@@ -51,6 +51,12 @@ public abstract class AbsStorageVlmData<RSC extends AbsResource<RSC>>
      * unknown and DRBD must not skip the initial sync on it.
      */
     protected transient boolean createdByStlt = false;
+    /*
+     * true if this satellite refused to adopt the already existing backing device (e.g. a zvol with a different
+     * volblocksize than requested). Such a device was never ours: deleting the volume must forget it, not destroy it.
+     * Not persisted: after a satellite restart the device is treated as adopted again.
+     */
+    protected transient boolean adoptionRefused = false;
 
     public AbsStorageVlmData(
         AbsVolume<RSC> vlmRef,
@@ -210,6 +216,16 @@ public abstract class AbsStorageVlmData<RSC extends AbsResource<RSC>>
     public boolean isCreatedByStlt()
     {
         return createdByStlt;
+    }
+
+    public void setAdoptionRefused(boolean adoptionRefusedRef)
+    {
+        adoptionRefused = adoptionRefusedRef;
+    }
+
+    public boolean isAdoptionRefused()
+    {
+        return adoptionRefused;
     }
 
 

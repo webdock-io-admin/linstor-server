@@ -1,6 +1,7 @@
 package com.linbit.linstor.layer.drbd;
 
 import com.linbit.linstor.storage.data.provider.AbsStorageVlmData;
+import com.linbit.linstor.storage.data.provider.zfs.ZfsData;
 import com.linbit.linstor.storage.interfaces.categories.resource.VlmProviderObject;
 
 import java.util.Arrays;
@@ -11,6 +12,8 @@ import org.junit.Test;
 import org.mockito.Mockito;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 public class DrbdLayerAdoptedDeviceTest
@@ -62,5 +65,58 @@ public class DrbdLayerAdoptedDeviceTest
         assertThat(DrbdLayer.isVolBlockSizeMismatch(16_384L, 16L)).isFalse();
         assertThat(DrbdLayer.isVolBlockSizeMismatch(null, 8L)).isFalse();
         assertThat(DrbdLayer.isVolBlockSizeMismatch(16_384L, null)).isFalse();
+    }
+
+    private static ZfsData<?> zfsVlm(boolean refused, Long requestedBytes, Long actualKiB)
+    {
+        ZfsData<?> zfsData = Mockito.mock(ZfsData.class);
+        when(zfsData.isAdoptionRefused()).thenReturn(refused);
+        when(zfsData.getRequestedVolBlockSize()).thenReturn(requestedBytes);
+        when(zfsData.getExtentSize()).thenReturn(actualKiB);
+        return zfsData;
+    }
+
+    @Test
+    public void refusedAndStillMismatchingStaysRefused()
+    {
+        ZfsData<?> zfsData = zfsVlm(true, 16_384L, 8L);
+        assertThat(DrbdLayer.refreshAdoptionRefusals(devices(zfsData), false)).containsExactly(zfsData);
+        verify(zfsData, never()).setAdoptionRefused(false);
+    }
+
+    @Test
+    public void refusedButFixedIsCleared()
+    {
+        // e.g. ZfscreateOptions changed to match the dataset
+        ZfsData<?> zfsData = zfsVlm(true, 8_192L, 8L);
+        assertThat(DrbdLayer.refreshAdoptionRefusals(devices(zfsData), false)).isEmpty();
+        verify(zfsData).setAdoptionRefused(false);
+    }
+
+    @Test
+    public void notRefusedIsIgnored()
+    {
+        ZfsData<?> zfsData = zfsVlm(false, 16_384L, 8L);
+        assertThat(DrbdLayer.refreshAdoptionRefusals(devices(zfsData), false)).isEmpty();
+        verify(zfsData, never()).setAdoptionRefused(false);
+    }
+
+    @Test
+    public void adoptedMismatchIsRefusedQuietlyWhileDeleting()
+    {
+        // e.g. the rd is being deleted and a satellite restart lost the marker
+        ZfsData<?> zfsData = zfsVlm(false, 16_384L, 8L);
+        when(zfsData.isCreatedByStlt()).thenReturn(false);
+        assertThat(DrbdLayer.refreshAdoptionRefusals(devices(zfsData), true)).containsExactly(zfsData);
+        verify(zfsData).setAdoptionRefused(true);
+    }
+
+    @Test
+    public void createdDeviceIsNeverRefusedWhileDeleting()
+    {
+        ZfsData<?> zfsData = zfsVlm(false, 16_384L, 8L);
+        when(zfsData.isCreatedByStlt()).thenReturn(true);
+        assertThat(DrbdLayer.refreshAdoptionRefusals(devices(zfsData), true)).isEmpty();
+        verify(zfsData, never()).setAdoptionRefused(true);
     }
 }
