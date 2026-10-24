@@ -10,7 +10,16 @@ public class RetryIfDeviceBusy implements Commands.RetryHandler
     private static final int DEFAULT_RETRY_DELAY_IN_MS = 100;
     private static final int DEFAULT_RETRY_COUNT = 3;
     private final int countMax;
+    private final long delayMaxInMs;
+    private final Sleeper sleeper;
     private int countCurrent;
+    private long delayNextInMs;
+
+    @FunctionalInterface
+    public interface Sleeper
+    {
+        void sleep(long millis) throws InterruptedException;
+    }
 
     public RetryIfDeviceBusy()
     {
@@ -19,8 +28,26 @@ public class RetryIfDeviceBusy implements Commands.RetryHandler
 
     public RetryIfDeviceBusy(int countRef)
     {
+        this(countRef, DEFAULT_RETRY_DELAY_IN_MS, DEFAULT_RETRY_DELAY_IN_MS);
+    }
+
+    /**
+     * Retries up to <code>countRef</code> times while the command's stderr contains "busy". The delay before the
+     * first retry is <code>delayInitialInMsRef</code> and doubles with each further retry, but never exceeds
+     * <code>delayMaxInMsRef</code>.
+     */
+    public RetryIfDeviceBusy(int countRef, long delayInitialInMsRef, long delayMaxInMsRef)
+    {
+        this(countRef, delayInitialInMsRef, delayMaxInMsRef, Thread::sleep);
+    }
+
+    public RetryIfDeviceBusy(int countRef, long delayInitialInMsRef, long delayMaxInMsRef, Sleeper sleeperRef)
+    {
         countMax = countRef;
+        delayMaxInMs = delayMaxInMsRef;
+        sleeper = sleeperRef;
         countCurrent = 0;
+        delayNextInMs = Math.min(delayInitialInMsRef, delayMaxInMsRef);
     }
 
     @Override
@@ -39,11 +66,12 @@ public class RetryIfDeviceBusy implements Commands.RetryHandler
         {
             try
             {
-                Thread.sleep(DEFAULT_RETRY_DELAY_IN_MS);
+                sleeper.sleep(delayNextInMs);
             }
             catch (InterruptedException ignored)
             {
             }
+            delayNextInMs = Math.min(delayNextInMs * 2, delayMaxInMs);
         }
         return retry;
     }

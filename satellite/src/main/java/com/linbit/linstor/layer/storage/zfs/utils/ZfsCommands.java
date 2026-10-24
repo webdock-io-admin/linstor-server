@@ -24,6 +24,14 @@ public class ZfsCommands
 {
     private static final String ZFS_USER_PROP_LINSTOR_PREFIX = "linstor:";
 
+    /*
+     * "zfs destroy" right after "drbdsetup down" can fail with "dataset is busy" for a few seconds while the zvol
+     * is still held open (e.g. by udev). Retry with backoff: 200, 400, 800, 1600, 2000, 2000 ms (7s in total).
+     */
+    static final int DESTROY_RETRY_COUNT = 6;
+    static final long DESTROY_RETRY_DELAY_INITIAL_IN_MS = 200;
+    static final long DESTROY_RETRY_DELAY_MAX_IN_MS = 2_000;
+
     public static OutputData list(ExtCmd extCmd, Collection<String> datasets) throws StorageException
     {
         return genericExecutorLimiter(
@@ -102,10 +110,25 @@ public class ZfsCommands
         );
     }
 
+    static RetryHandler destroyRetryHandler()
+    {
+        return destroyRetryHandler(Thread::sleep);
+    }
+
+    static RetryHandler destroyRetryHandler(RetryIfDeviceBusy.Sleeper sleeperRef)
+    {
+        return new RetryIfDeviceBusy(
+            DESTROY_RETRY_COUNT,
+            DESTROY_RETRY_DELAY_INITIAL_IN_MS,
+            DESTROY_RETRY_DELAY_MAX_IN_MS,
+            sleeperRef
+        );
+    }
+
     public static OutputData delete(ExtCmd extCmd, String zpool, String identifier, ZfsVolumeType type)
         throws StorageException
     {
-        return delete(extCmd, zpool + File.separator + identifier, type, new RetryIfDeviceBusy());
+        return delete(extCmd, zpool + File.separator + identifier, type, destroyRetryHandler());
     }
 
     public static OutputData delete(
@@ -123,7 +146,7 @@ public class ZfsCommands
     public static OutputData delete(ExtCmd extCmd, String fullQualifiedIdentifier, ZfsVolumeType type)
         throws StorageException
     {
-        return delete(extCmd, fullQualifiedIdentifier, type, new RetryIfDeviceBusy());
+        return delete(extCmd, fullQualifiedIdentifier, type, destroyRetryHandler());
     }
 
     public static OutputData delete(
