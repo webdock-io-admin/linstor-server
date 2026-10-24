@@ -2,6 +2,8 @@ package com.linbit.linstor.layer.drbd;
 
 import com.linbit.ImplementationError;
 import com.linbit.Platform;
+import com.linbit.SizeConv;
+import com.linbit.SizeConv.SizeUnit;
 import com.linbit.ValueOutOfRangeException;
 import com.linbit.drbd.DrbdVersion;
 import com.linbit.drbd.md.GidGenerator;
@@ -65,6 +67,7 @@ import com.linbit.linstor.storage.data.RscLayerSuffixes;
 import com.linbit.linstor.storage.data.adapter.drbd.DrbdRscData;
 import com.linbit.linstor.storage.data.adapter.drbd.DrbdVlmData;
 import com.linbit.linstor.storage.data.provider.AbsStorageVlmData;
+import com.linbit.linstor.storage.data.provider.zfs.ZfsData;
 import com.linbit.linstor.storage.interfaces.categories.resource.AbsRscLayerObject;
 import com.linbit.linstor.storage.interfaces.categories.resource.VlmProviderObject;
 import com.linbit.linstor.storage.interfaces.categories.resource.VlmProviderObject.Size;
@@ -1492,6 +1495,7 @@ public class DrbdLayer implements DeviceLayer
     private void createMetaData(DrbdVlmData<Resource> drbdVlmData)
         throws StorageException, ImplementationError, VolumeException
     {
+        checkAdoptedZfsDevices(drbdVlmData);
         try
         {
             int bitmapBlockSizeKiB = MetaData.DRBD_DEFAULT_BM_BIT_COVER_kiB;
@@ -1649,6 +1653,64 @@ public class DrbdLayer implements DeviceLayer
         {
             throw new ImplementationError(exc);
         }
+    }
+
+    /**
+     * A zvol that already existed under the expected name (not created by this satellite) keeps its volblocksize.
+     * Refuses it if StorDriver/ZfscreateOptions explicitly requests a different one, and warns on a size mismatch.
+     * Only called for new DRBD metadata, i.e. for a new replica, so existing volumes are never refused.
+     */
+    private void checkAdoptedZfsDevices(DrbdVlmData<Resource> drbdVlmData) throws StorageException
+    {
+        for (VlmProviderObject<?> storageDevice : VolumeUtils.getStorageDevices(
+            drbdVlmData.getChildBySuffix(RscLayerSuffixes.SUFFIX_DATA)
+        ))
+        {
+            if (storageDevice instanceof ZfsData<?> zfsData && !zfsData.isCreatedByStlt())
+            {
+                final String dataset = zfsData.getFullQualifiedLvIdentifier();
+                final @Nullable Long requestedVolBlockSize = zfsData.getRequestedVolBlockSize();
+                final @Nullable Long actualVolBlockSizeKiB = zfsData.getExtentSize();
+                if (isVolBlockSizeMismatch(requestedVolBlockSize, actualVolBlockSizeKiB))
+                {
+                    throw new StorageException(
+                        "Meta data creation for resource '" +
+                            drbdVlmData.getRscLayerObject().getSuffixedResourceName() + "' volume " +
+                            drbdVlmData.getVlmNr().value + " refused",
+                        getAbortMsg(drbdVlmData),
+                        "The ZFS dataset '" + dataset + "' already existed and was not created by LINSTOR. Its " +
+                            "volblocksize is " + actualVolBlockSizeKiB + " KiB, but StorDriver/ZfscreateOptions " +
+                            "requests " + requestedVolBlockSize + " bytes",
+                        "Remove or rename the existing dataset so that LINSTOR creates a new one, or adjust " +
+                            "StorDriver/ZfscreateOptions",
+                        null,
+                        null
+                    );
+                }
+                if (zfsData.getUsableSize() != zfsData.getExpectedSize())
+                {
+                    errorReporter.logWarning(
+                        "DRBD volume %s/%d: the ZFS dataset '%s' already existed and was not created by LINSTOR; " +
+                            "its size is %d KiB, expected %d KiB",
+                        drbdVlmData.getRscLayerObject().getSuffixedResourceName(),
+                        drbdVlmData.getVlmNr().value,
+                        dataset,
+                        zfsData.getUsableSize(),
+                        zfsData.getExpectedSize()
+                    );
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns true if a volblocksize is explicitly requested (in bytes) and the dataset's actual one (in KiB, as
+     * reported by "zfs list") is known and differs.
+     */
+    static boolean isVolBlockSizeMismatch(@Nullable Long requestedBytesRef, @Nullable Long actualKiBRef)
+    {
+        return requestedBytesRef != null && actualKiBRef != null &&
+            SizeConv.convert(actualKiBRef, SizeUnit.UNIT_KiB, SizeUnit.UNIT_B) != requestedBytesRef;
     }
 
     /**
