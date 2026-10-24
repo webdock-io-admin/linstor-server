@@ -6,6 +6,7 @@ import com.linbit.extproc.utils.TestExtCmd.Command;
 import com.linbit.extproc.utils.TestExtCmd.TestOutputData;
 import com.linbit.fsevent.FileSystemWatch;
 import com.linbit.linstor.api.ApiConsts;
+import com.linbit.linstor.api.ApiCallRcImpl;
 import com.linbit.linstor.backupshipping.BackupShippingMgr;
 import com.linbit.linstor.clone.CloneService;
 import com.linbit.linstor.core.ControllerPeerConnector;
@@ -13,6 +14,7 @@ import com.linbit.linstor.core.StltConfigAccessor;
 import com.linbit.linstor.core.apicallhandler.StltExtToolsChecker;
 import com.linbit.linstor.core.identifier.VolumeNumber;
 import com.linbit.linstor.core.objects.Resource;
+import com.linbit.linstor.core.objects.ResourceDefinition;
 import com.linbit.linstor.core.objects.StorPool;
 import com.linbit.linstor.core.objects.Volume;
 import com.linbit.linstor.layer.DeviceLayer.NotificationListener;
@@ -27,6 +29,7 @@ import com.linbit.linstor.storage.kinds.DeviceLayerKind;
 import com.linbit.linstor.storage.kinds.DeviceProviderKind;
 
 import java.util.Collections;
+import java.util.List;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -51,6 +54,7 @@ public class ZfsProviderAdoptedZvolTest extends GenericDbBase
     private TestExtCmd extCmd;
     private ZfsProvider zfsProvider;
     private ZfsData<Resource> zfsData;
+    private Volume vlm;
 
     @Before
     public void setUp() throws Exception
@@ -99,7 +103,7 @@ public class ZfsProviderAdoptedZvolTest extends GenericDbBase
             ZPOOL,
             ApiConsts.NAMESPC_STORAGE_DRIVER
         );
-        Volume vlm = volumeTestFactory.builder(NODE_NAME_STR, RSC_NAME_STR, 0)
+        vlm = volumeTestFactory.builder(NODE_NAME_STR, RSC_NAME_STR, 0)
             .setSize(VLM_SIZE_IN_KIB)
             .setStorPoolData(storPool)
             .build();
@@ -160,5 +164,53 @@ public class ZfsProviderAdoptedZvolTest extends GenericDbBase
         assertThat(extCmd.getUncalledCommands()).isEmpty();
         assertThat(zfsData.exists()).isTrue();
         assertThat(zfsData.getRequestedVolBlockSize()).isNull();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void refusedZvolIsForgottenNotDestroyedOnDelete() throws Exception
+    {
+        // a zvol LINSTOR refused to adopt was never ours: deleting the volume must not run "zfs destroy" on it
+        createScenario("-b 16K");
+        expectZfsList(zvolRow(8_192));
+        zfsProvider.prepare(Collections.singletonList(zfsData), Collections.emptyList());
+        assertThat(zfsData.exists()).isTrue();
+
+        zfsData.setAdoptionRefused(true);
+        vlm.getFlags().enableFlags(Volume.Flags.DELETE);
+
+        // any unexpected command (e.g. "zfs destroy") makes TestExtCmd fail the test
+        zfsProvider.processVolumes(
+            (List<com.linbit.linstor.storage.interfaces.categories.resource.VlmProviderObject<Resource>>) (List<?>)
+                Collections.singletonList(zfsData),
+            new ApiCallRcImpl()
+        );
+
+        assertThat(zfsData.exists()).isFalse();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void refusedVolumeIsNotCreatedWhileRscDfnIsDeleted() throws Exception
+    {
+        // the refused zvol disappeared while the resource definition is being deleted: no "zfs create" for a volume
+        // that is about to be deleted anyway
+        createScenario("-b 16K");
+        expectZfsList("");
+        zfsProvider.prepare(Collections.singletonList(zfsData), Collections.emptyList());
+        assertThat(zfsData.exists()).isFalse();
+
+        zfsData.setAdoptionRefused(true);
+        vlm.getAbsResource().getResourceDefinition().getFlags().enableFlags(ResourceDefinition.Flags.DELETE);
+
+        // any unexpected command (e.g. "zfs create") makes TestExtCmd fail the test
+        zfsProvider.processVolumes(
+            (List<com.linbit.linstor.storage.interfaces.categories.resource.VlmProviderObject<Resource>>) (List<?>)
+                Collections.singletonList(zfsData),
+            new ApiCallRcImpl()
+        );
+
+        assertThat(zfsData.exists()).isFalse();
+        assertThat(zfsData.isAdoptionRefused()).isTrue();
     }
 }

@@ -29,6 +29,7 @@ import com.linbit.linstor.core.objects.AbsResource;
 import com.linbit.linstor.core.objects.AbsVolume;
 import com.linbit.linstor.core.objects.Resource;
 import com.linbit.linstor.core.objects.Resource.Flags;
+import com.linbit.linstor.core.objects.ResourceDefinition;
 import com.linbit.linstor.core.objects.Snapshot;
 import com.linbit.linstor.core.objects.Volume;
 import com.linbit.linstor.core.objects.VolumeDefinition;
@@ -283,6 +284,16 @@ public class DrbdLayer implements DeviceLayer
 
                 // this should not be executed if deleting the drbd resource fails
                 drbdResFileUtils.deleteBackupResFile(drbdRscData);
+            }
+            else if (isAdoptionStillRefused(drbdRscData))
+            {
+                /*
+                 * The adoption was refused (and reported) in an earlier run. Failing again on every run would also
+                 * fail unrelated operations on this resource definition, e.g. the staged resource-definition delete,
+                 * which updates this satellite before marking this resource for deletion. Leave the DRBD resource
+                 * unconfigured until the dataset or the options are fixed.
+                 */
+                addNotAdjustedMsg(drbdRscData, apiCallRc);
             }
             else
             {
@@ -1673,6 +1684,7 @@ public class DrbdLayer implements DeviceLayer
                 final @Nullable Long actualVolBlockSizeKiB = zfsData.getExtentSize();
                 if (isVolBlockSizeMismatch(requestedVolBlockSize, actualVolBlockSizeKiB))
                 {
+                    zfsData.setAdoptionRefused(true);
                     throw new StorageException(
                         "Meta data creation for resource '" +
                             drbdVlmData.getRscLayerObject().getSuffixedResourceName() + "' volume " +
@@ -1701,6 +1713,83 @@ public class DrbdLayer implements DeviceLayer
                 }
             }
         }
+    }
+
+    /**
+     * Returns true if a volume of the resource has a ZFS device whose adoption was refused in an earlier run and
+     * still mismatches. A device that no longer mismatches (dataset or options fixed) gets its marker cleared and is
+     * checked again in {@link #createMetaData}.
+     */
+    private boolean isAdoptionStillRefused(DrbdRscData<Resource> drbdRscDataRef)
+    {
+        // while the resource definition is being deleted, the controller updates this satellite before it marks this
+        // resource for deletion. A never configured resource must not fail that update (e.g. after a restart lost the
+        // marker), and DRBD metadata must not be written onto the foreign device either.
+        Resource rsc = drbdRscDataRef.getAbsResource();
+        final boolean refuseNewWhileDeleting =
+            rsc.getResourceDefinition().getFlags().isSet(ResourceDefinition.Flags.DELETE) &&
+                !isDrbdRscUp(drbdRscDataRef);
+        boolean stillRefused = false;
+        for (DrbdVlmData<Resource> drbdVlmData : drbdRscDataRef.getVlmLayerObjects().values())
+        {
+            for (ZfsData<?> zfsData : refreshAdoptionRefusals(
+                VolumeUtils.getStorageDevices(drbdVlmData.getChildBySuffix(RscLayerSuffixes.SUFFIX_DATA)),
+                refuseNewWhileDeleting
+            ))
+            {
+                errorReporter.logWarning(
+                    "DRBD volume %s/%d: still refusing to adopt the ZFS dataset '%s' (volblocksize %d KiB, " +
+                        "requested %d bytes); the DRBD resource stays unconfigured",
+                    drbdVlmData.getRscLayerObject().getSuffixedResourceName(),
+                    drbdVlmData.getVlmNr().value,
+                    zfsData.getFullQualifiedLvIdentifier(),
+                    zfsData.getExtentSize(),
+                    zfsData.getRequestedVolBlockSize()
+                );
+                stillRefused = true;
+            }
+        }
+        return stillRefused;
+    }
+
+    /**
+     * Returns the ZFS devices whose adoption was refused and that still mismatch. Clears the marker of refused
+     * devices that no longer mismatch. If {@code refuseNewRef} is set, an adopted (not created by this satellite)
+     * mismatching device is refused here as well, without an error.
+     */
+    static List<ZfsData<?>> refreshAdoptionRefusals(
+        Collection<VlmProviderObject<?>> storageDevicesRef,
+        boolean refuseNewRef
+    )
+    {
+        List<ZfsData<?>> stillRefused = new ArrayList<>();
+        for (VlmProviderObject<?> storageDevice : storageDevicesRef)
+        {
+            if (storageDevice instanceof ZfsData<?> zfsData)
+            {
+                boolean mismatch = isVolBlockSizeMismatch(
+                    zfsData.getRequestedVolBlockSize(),
+                    zfsData.getExtentSize()
+                );
+                if (zfsData.isAdoptionRefused())
+                {
+                    if (mismatch)
+                    {
+                        stillRefused.add(zfsData);
+                    }
+                    else
+                    {
+                        zfsData.setAdoptionRefused(false);
+                    }
+                }
+                else if (refuseNewRef && mismatch && !zfsData.isCreatedByStlt())
+                {
+                    zfsData.setAdoptionRefused(true);
+                    stillRefused.add(zfsData);
+                }
+            }
+        }
+        return stillRefused;
     }
 
     /**
