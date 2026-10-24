@@ -53,4 +53,14 @@ public class DrbdLayerAdoptedDeviceTest
         assertThat(DrbdLayer.isCreatedByStlt(devices(other))).isTrue();
         assertThat(DrbdLayer.isCreatedByStlt(Collections.emptyList())).isTrue();
     }
+
+    @Test
+    public void volBlockSizeMismatch()
+    {
+        // requested in bytes, actual in KiB as reported by "zfs list"
+        assertThat(DrbdLayer.isVolBlockSizeMismatch(16_384L, 8L)).isTrue();
+        assertThat(DrbdLayer.isVolBlockSizeMismatch(16_384L, 16L)).isFalse();
+        assertThat(DrbdLayer.isVolBlockSizeMismatch(null, 8L)).isFalse();
+        assertThat(DrbdLayer.isVolBlockSizeMismatch(16_384L, null)).isFalse();
+    }
 }
