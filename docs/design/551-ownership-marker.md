@@ -1,6 +1,6 @@
 # Design: persistent ownership marker for backing devices (#551)
 
-Status: draft for discussion with the LINSTOR maintainers, 2026-10-26. Not
+Status: proposal for discussion with the LINSTOR maintainers, 2026-10-27. Not
 implemented. References are to master e1d99946e.
 
 ## Problem
@@ -14,12 +14,12 @@ silently:
 
 - its properties (e.g. `volblocksize`) win over `StorDriver/ZfscreateOptions`;
 - on thin storage, DRBD skipped the initial sync on it, so the replicas
-  silently diverged (#551, fixed by `fix/linstor-server-11-adopted-device-sync`
+  silently diverged (#551, fixed by #557
   for non-winning replicas);
 - deleting the volume destroys the adopted device, even though LINSTOR never
   created it.
 
-Two follow-up branches (`-11-adopted-device-sync`, `-12-adopted-zvol-blocksize`)
+Two pull requests (#557, #558)
 tell "created by this satellite" from "adopted" with a transient flag. That
 flag is lost on every satellite restart, so after a restart every existing
 device looks adopted. That limits what can safely be refused (only new DRBD
@@ -33,15 +33,15 @@ A persistent marker on the device itself closes these gaps.
 Adopted zvol created by hand at the name LINSTOR uses (`volblocksize` 8K),
 volume definition with `StorDriver/ZfscreateOptions -b 16K`:
 
-| Case | Adopted zvol | Without fix | With the transient flag (v2-v4 test builds) |
+| Case | Adopted zvol | Without fix | With the transient flag (#557, #558) |
 |---|---|---|---|
 | a | exact size, empty | adopted, 8K kept, initial sync skipped, UpToDate | non-winner: warning, full resync, `drbdadm verify` 0 |
 | b | smaller, empty | adopted, grown by `zfs set volsize`, otherwise as a | as a |
 | c | exact size, 64 MiB random data | adopted, sync skipped, verify: 16,384 4 KiB blocks out of sync | non-winner: full resync, verify 0 |
 | w | as c, on the race winner | as c | warning only, verify: 16,384 out of sync (known limitation) |
-| -b 16K mismatch (v4) | as c, non-winner | adopted | refused once with an error report, later runs only warn; `resource-definition delete` completes in one call and leaves the foreign zvol untouched |
+| -b 16K mismatch (#558) | as c, non-winner | adopted | refused once with an error report, later runs only warn; `resource-definition delete` completes in one call and leaves the foreign zvol untouched |
 
-The first v4 predecessor (v3) also showed that a refusal must not fail every
+An earlier version of #558 also showed that a refusal must not fail every
 run: the staged `resource-definition delete` updates the satellite before it
 marks the resource, and repeated errors blocked it.
 
@@ -76,7 +76,7 @@ When a device with the expected name exists:
 | other LINSTOR volume UUID | leftover of an earlier incarnation, or another volume's | refuse (default), or rename out of the way (`_foreign_<name>_<time>`, like `_deleted_`) and create a new device; configurable |
 | none | hand-made, or created before the marker existed | see "Migration"; after migration: refuse |
 
-A refusal is reported once and then only logged, as in branch 12, so it does
+A refusal is reported once and then only logged, as in #558, so it does
 not block unrelated operations.
 
 ### Delete
@@ -138,7 +138,7 @@ and gives a rollback path (`enforce` back to `mark`/`off`).
    where the thin skip-sync and the #545 leftovers occur.
 6. Delete of an unmarked device: forget (proposal) or keep destroying until
    `enforce`? Forgetting can leak space on clusters that never migrate.
-7. Interaction with `fix/linstor-server-11` / `-12` (transient flag): keep
+7. Interaction with #557 / #558 (transient flag): keep
    them as the minimal fix and build the marker on top, or replace them?
 
 ## Out of scope
@@ -149,4 +149,4 @@ before it becomes the winner, but the GI question stays open on its own.
 
 ---
 
-Prepared with AI assistance at Webdock; reviewed by <engineer>
+Prepared with AI assistance at Webdock; reviewed by Arni (Webdock)
