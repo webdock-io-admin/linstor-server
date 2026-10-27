@@ -40,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   made `since`/`to` filters of the error-report listing miss recent reports
 - DRBD: a thin replica whose backing device already existed and was not created by the satellite (e.g. a zvol left
   behind by a failed delete) no longer skips the initial sync
+- ZFS: an existing zvol whose volblocksize differs from an explicit one in `StorDriver/ZfscreateOptions` is refused
+  instead of silently adopted, and a resource-definition delete leaves it in place
 
 ## [1.35.3] - 2026-10-21
 
