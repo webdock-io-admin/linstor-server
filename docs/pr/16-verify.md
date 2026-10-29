@@ -7,20 +7,20 @@ only.
 
 ## Build under test
 
-Prerelease `dev-16-jars` on webdock-io-admin/linstor-server:
+Prerelease `dev-16-jars-v2` on webdock-io-admin/linstor-server (supersedes `dev-16-jars`):
 
 | Asset | sha256 |
 |---|---|
-| `satellite-1.35.2-2-ef5f6d525.jar` | `e050049bd164d2887676a6cbc1b337ce166fce98615391fc2ae4f7d8290f961a` |
-| `server-1.35.2-2-ef5f6d525.jar` | `79162acade8f22ddaa9d63bc7078f8bb0ca5a25d86bf047e043326920bcd5895` |
+| `satellite-1.35.2-3-ea0432eb0.jar` | `e5a57b749d540d9768cc5c5440beed44198257fb60964dd32090dcbf66614d19` |
+| `server-1.35.2-3-ea0432eb0.jar` | `3994ef1e86fa87ab8d93b12a31c607e2626065e7cd4d8420963d6b84c591195a` |
 
 Both jars come from one build of the v1.35.2 tag (4f9bfb0a3) plus two
-cherry-picked code commits. The resulting build commit ef5f6d525 is local and
+cherry-picked code commits. The resulting build commit ea0432eb0 is local and
 not on the fork:
 
 1. 69aef6448: #545 ZFS destroy retry (the fix the rack satellites already
    carry). It is in the satellite jar.
-2. f68dc96b0: fix 16. `Commands.genericExecutorLimiter` is in the server jar;
+2. f68dc96b0 and 8678a9569: fix 16. `Commands.genericExecutorLimiter` is in the server jar;
    `ZfsUtils`, `ZfsCommands` and `ZfsProvider` are in the satellite jar.
 
 Both jars must be replaced together. The server jar carries `Commands`, and
@@ -29,7 +29,7 @@ NoSuchMethodError in the #551 test build). The controller and the other
 satellites stay stock: the change touches no API, protobuf or database code,
 and the version stays 1.35.2.
 
-Tests of this build: satellite module 126 and ZFS utils 17, 0 failures.
+Tests of this build: satellite module 126 and ZFS utils 19, 0 failures.
 
 ## Install (storage node A, satellite only)
 
