@@ -177,19 +177,30 @@ public class ZfsUtils
     public static HashMap<String, ZfsInfo> getZfsList(
         final ExtCmdFactory extCmdFactoryRef,
         Collection<String> datasets,
-        Collection<String> poolDatasets,
         DeviceProviderKind kindRef,
         Map<String, BiConsumer<ZfsInfo, String>> zfsPropertiesWithSetters
     )
         throws StorageException
     {
         final HashMap<String, ZfsInfo> infoByIdentifier = buildZfsInfoMap(extCmdFactoryRef.create(), datasets, kindRef);
+        // the properties are only applied to the entries of infoByIdentifier, so a recursive "zfs get" on the listed
+        // volumes (and on snapshots whose volume was not listed) is enough. Querying the whole zpool instead would
+        // cost time proportional to every volume and snapshot in it.
+        Set<String> listedRoots = new TreeSet<>();
+        for (String identifier : infoByIdentifier.keySet())
+        {
+            int snapSeparatorIdx = identifier.indexOf('@');
+            if (snapSeparatorIdx == -1 || !infoByIdentifier.containsKey(identifier.substring(0, snapSeparatorIdx)))
+            {
+                listedRoots.add(identifier);
+            }
+        }
         for (Entry<String, BiConsumer<ZfsInfo, String>> entry : zfsPropertiesWithSetters.entrySet())
         {
             Map<String, String> properties = getZfsLocalProperty(
                 extCmdFactoryRef.create(),
                 entry.getKey(),
-                poolDatasets,
+                listedRoots,
                 Function.identity()
             );
 
