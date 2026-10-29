@@ -407,6 +407,21 @@ public class ZfsUtils
         throws StorageException
     {
         final OutputData output = ZfsCommands.getUserProperty(extCmdRef, zfsPropRef, dataSetsRef);
+        // exit code 1 is allowed for datasets destroyed since they were listed. Any other error (e.g. a faulted or
+        // exported pool) must not look like "property not set", or marked datasets would never be cleaned up
+        for (final String errLine : StringUtils.split(new String(output.stderrData, StandardCharsets.UTF_8), "\n"))
+        {
+            if (!errLine.isBlank() && !errLine.contains("dataset does not exist"))
+            {
+                throw new StorageException(
+                    "Failed to get user property '" + zfsPropRef + "'",
+                    null,
+                    null,
+                    null,
+                    "zfs get reported: " + new String(output.stderrData, StandardCharsets.UTF_8).trim()
+                );
+            }
+        }
         final HashMap<String, T> ret = new HashMap<>();
 
         final String[] lines = StringUtils.split(new String(output.stdoutData, StandardCharsets.UTF_8), "\n");
