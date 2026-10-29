@@ -297,6 +297,65 @@ public class ZfsUtilsExtCmdTest
     }
 
     @Test
+    public void zfsListToleratesDatasetsDestroyedBeforeThePropertyQuery() throws StorageException
+    {
+        expect(
+            StringUtils.concat(ZFS_LIST_BASE_CMD, "rpool/vol0", "rpool/vol1"),
+            "rpool/vol0\t57344\t1073741824\tvolume\t8192\t-\t-\n" +
+                "rpool/vol1\t57344\t1073741824\tvolume\t8192\t-\t-\n"
+        );
+        String[] getCmd = {
+            "zfs", "get", "-r", "-o", "name,value", "-H", "-p", "-s", "local", "linstor:marked_for_deletion",
+            "rpool/vol0", "rpool/vol1"
+        };
+        // vol1 was destroyed between the list and the get
+        extCmd.setExpectedBehavior(
+            new Command(getCmd),
+            new TestOutputData(getCmd, "rpool/vol0\ttrue\n", "cannot open 'rpool/vol1': dataset does not exist\n", 1)
+        );
+
+        Map<String, String> appliedProps = new HashMap<>();
+        ZfsUtils.getZfsList(
+            extCmdFactory,
+            new LinkedHashSet<>(Arrays.asList("rpool/vol0", "rpool/vol1")),
+            DeviceProviderKind.ZFS_THIN,
+            Collections.singletonMap(
+                "marked_for_deletion",
+                (zfsInfo, value) -> appliedProps.put(zfsInfo.identifier, value)
+            )
+        );
+
+        assertThat(appliedProps).containsExactly(Map.entry("vol0", "true"));
+    }
+
+    @Test
+    public void zfsListFailsOnOtherPropertyQueryErrors()
+    {
+        expect(
+            StringUtils.concat(ZFS_LIST_BASE_CMD, "rpool/vol0"),
+            "rpool/vol0\t57344\t1073741824\tvolume\t8192\t-\t-\n"
+        );
+        String[] getCmd = {
+            "zfs", "get", "-r", "-o", "name,value", "-H", "-p", "-s", "local", "linstor:marked_for_deletion",
+            "rpool/vol0"
+        };
+        // must not be read as "no dataset is marked for deletion"
+        extCmd.setExpectedBehavior(
+            new Command(getCmd),
+            new TestOutputData(getCmd, "", "cannot open 'rpool/vol0': pool I/O is currently suspended\n", 1)
+        );
+
+        assertThatThrownBy(
+            () -> ZfsUtils.getZfsList(
+                extCmdFactory,
+                Collections.singletonList("rpool/vol0"),
+                DeviceProviderKind.ZFS_THIN,
+                Collections.singletonMap("marked_for_deletion", (zfsInfo, value) -> { })
+            )
+        ).isInstanceOf(StorageException.class);
+    }
+
+    @Test
     public void zfsListSplitsDatasetsIntoBatchesWithoutAnEmptyOne() throws StorageException
     {
         List<String> datasets = new ArrayList<>();
