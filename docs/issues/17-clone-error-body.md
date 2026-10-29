@@ -2,16 +2,33 @@ Title: REST error bodies are not always an ApiCallRc list: clone errors (HTTP 50
 
 **Environment:** LINSTOR controller 1.35.2 (same code on master e1d99946e), REST API v1, the Go client golinstor as used by the Incus LINSTOR storage driver.
 
-**What happens:** a clone failed on the controller with an unhandled
-`PeerClosingConnectionException`. `POST /v1/resource-definitions/{rsc}/clone`
-answered HTTP 500, and golinstor reported only
+**What happens:** a clone failed on the controller, and
+`POST /v1/resource-definitions/{rsc}/clone` answered HTTP 500. The client
+(Incus via golinstor) reported only
 
 ```
-json: cannot unmarshal object into Go value of type client.ApiCallError
+Error: Failed instance creation: Failed creating instance from image: Unable to start cloning resource definition: json: cannot unmarshal object into Go value of type client.ApiCallError
 ```
 
 The controller's actual error was lost, because golinstor decodes every
 non-2xx body as a list of `ApiCallRc` and this body is an object.
+
+Observed twice on a 6-node dev cluster (times as logged, UTC):
+
+- 2026-10-19 20:13-20:14, 10 parallel instance launches from one image. The
+  load balancer logged the clone POST as 500, 1776 bytes, 42.9 s. The
+  controller logged `Failed to access DRBD super-block of volume <clone>/0`
+  for storage node B, then `Exceptions have been converted to responses`, and
+  marked the resource definition failed. The error report shows a
+  `DelayedApiRcException` in stage "Finish clone update" with the suppressed
+  `ApiRcException` "(node B) Failed to access DRBD super-block of volume
+  <clone>/0", numeric code -4611686018427386906. That entry is what the
+  1776-byte body carried.
+- 2026-10-28 21:57:20: 500 with 2222 bytes after 4.9 s, then a retry 500 with
+  847 bytes ("non-UpToDate DRBD device").
+
+Neither the controller nor the client logs response bodies, so the body below
+is reconstructed from the code, not captured.
 
 **Shapes the controller returns for errors (master e1d99946e):**
 
@@ -34,9 +51,8 @@ that nor the `ApiCallRcList` it uses everywhere else. `OperationFailed` is
 referenced by other operations too, and for those the actual body is the
 list, so the spec's `ApiCallRc` there looks like it should be `ApiCallRcList`.
 
-**Shape of the clone error body.** This is reconstructed from
-`Json.resourceDefCloneStarted`, not captured; the fields of the error entry
-are illustrative:
+**Shape of the clone error body**, reconstructed from
+`Json.resourceDefCloneStarted` with the error entry of the first case:
 
 ```json
 {
@@ -45,9 +61,9 @@ are illustrative:
   "clone_name": "dst",
   "messages": [
     {
-      "ret_code": "<masked error code>",
-      "message": "<controller error message>",
-      "error_report_ids": ["<id>"]
+      "ret_code": -4611686018427386906,
+      "message": "(node B) Failed to access DRBD super-block of volume <clone>/0",
+      "error_report_ids": ["<report id>"]
     }
   ]
 }
@@ -68,8 +84,8 @@ On the client side we propose a tolerant decode for golinstor (list, then an
 object with `messages`, then the raw body kept in the error); we would offer
 that to golinstor separately.
 
-**Steps to reproduce:** make a clone fail on the controller side, e.g. clone
-from a resource whose satellite drops the connection during the clone. Then
+**Steps to reproduce:** make a clone fail on the controller side (in our
+case a DRBD super-block error on one node during 10 parallel clones). Then
 look at the HTTP status and body of `POST /v1/resource-definitions/{rsc}/clone`
 with `curl -i`.
 
