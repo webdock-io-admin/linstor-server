@@ -2,8 +2,8 @@ Title: 9.3.4: diskless peer goes StandAlone on "Current UUID of peer does not ma
 
 ## Environment
 
-- DRBD kernel module 9.3.4 (api:2/proto:118-125), GIT-hash e59b287b199f7224468af85b68a10e83c68213f5
-- drbd-utils 9.35.0
+- DRBD kernel module 9.3.4 (api:2/proto:118-125), GIT-hash e59b287b199f7224468af85b68a10e83c68213f5, drbd-dkms 9.3.4-1ppa1~noble1 from ppa:linbit/linbit-drbd9-stack, DKMS-built
+- drbd-utils 9.35.0-1ppa1~noble1
 - Kernel 7.2.11-zabbly+, Ubuntu 24.04
 - LINSTOR 1.35.2 (client 1.29.1) generates the configuration; consumer is the Incus LINSTOR driver
 - Resource with 2 volumes: `quorum majority`, `allow-two-primaries yes`, `cram-hmac-alg sha1`, `verify-alg sha512`,

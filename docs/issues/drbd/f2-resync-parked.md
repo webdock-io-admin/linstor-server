@@ -2,9 +2,11 @@ Title: 9.3.4: resync never concludes after a refused second handshake ("Becoming
 
 ## Environment
 
-- DRBD kernel module 9.3.4 (api:2/proto:118-125), GIT-hash e59b287b199f7224468af85b68a10e83c68213f5
-- drbd-utils 9.35.0
-- Kernel 7.2.11-zabbly+, Ubuntu 24.04
+- DRBD kernel module 9.3.4 (api:2/proto:118-125), GIT-hash e59b287b199f7224468af85b68a10e83c68213f5, from
+  drbd-dkms 9.3.4-1ppa1~noble1 (ppa:linbit/linbit-drbd9-stack), DKMS-built against the running kernel
+- drbd-utils 9.35.0-1ppa1~noble1
+- Kernel 7.2.11-zabbly+ (zabbly mainline build 7.2.11-amd64-202610151432-ubuntu24.04), Ubuntu 24.04
+- Same versions on both storage nodes
 - LINSTOR 1.35.2 generates the configuration. `quorum majority`, `c-min-rate 0` in this resource group (also tried
   with 256000, see below), two network paths per connection.
 
@@ -21,8 +23,7 @@ Resources: R1 (vol0 10 GiB, vol1 0.49 GiB), R2 (vol0 40 GiB, vol1 0.49 GiB).
 
 ## What happens
 
-B was rebooted for firmware updates four times on 2026-10-30. The reconnects described here are at 09:39, 09:53,
-10:09 and 10:33 CET.
+B was rebooted for firmware updates four times on 2026-10-30 and reconnected at 09:39, 09:53, 10:09 and 10:33 CET.
 Each time A began a small bitmap resync as SyncSource toward B, a few hundred KB (vol1: 0 KB). Within 50-100 ms a
 second handshake arrived ("Becoming WFBitMapS because primary is diskless"). It was refused with -8 and postponed
 "until current resync finished", and from then on the running resync made no progress:
@@ -53,10 +54,17 @@ Logged on A (peer name `B` in the prefix), CET, resource name shortened:
 2026-10-30T10:09:22.251681+01:00 drbd R1/0 drbd1127 B: uuid_compare()=source-use-bitmap by rule=bitmap-self
 2026-10-30T10:09:22.251694+01:00 drbd R1/0 drbd1127 B: Becoming WFBitMapS because primary is diskless
 2026-10-30T10:09:22.251731+01:00 drbd R1: State change failed: Can not start OV/resync since it is already active (-8)
+2026-10-30T10:09:22.251762+01:00 drbd R1/0 drbd1127 B: Failed: repl( SyncSource -> WFBitMapS ) [diskless-primary]
+2026-10-30T10:09:22.264344+01:00 drbd R1/0 drbd1127 B: ...postponing this until current resync finished
+2026-10-30T10:09:22.264464+01:00 drbd R1/1 drbd1128 B: Becoming WFBitMapS because primary is diskless
+2026-10-30T10:09:22.264478+01:00 drbd R1: State change failed: Can not start OV/resync since it is already active (-8)
+2026-10-30T10:09:22.264488+01:00 drbd R1/1 drbd1128 B: Failed: repl( SyncSource -> WFBitMapS ) [diskless-primary]
+2026-10-30T10:09:22.265066+01:00 drbd R1/1 drbd1128 B: ...postponing this until current resync finished
 ```
 
-followed on A by `Failed: repl( SyncSource -> WFBitMapS ) [diskless-primary]` and "...postponing this until current
-resync finished" (quoted from our notes; the exact lines with timestamps can be provided).
+The refusal alone does not park a resync: the same four-line sequence was logged for other resources on the same
+reconnect (e.g. at 10:09:20.93 and 10:09:21.79 CET), and those finished their resyncs in 1-2 s. Only R1 and R2
+parked.
 
 Logged on B (peer name `A` in the prefix), at the 10:33 CET boot, times in UTC as logged:
 
@@ -115,8 +123,8 @@ trigger (the sync source losing the diskless Primary).
 
 B's kernel lines at the moment of the refused second handshake (10:09:22 CET), and `drbdsetup status --verbose` /
 `drbdsetup events2` captures from both sides while a resync is parked. The A and B status values above are from
-`drbdsetup status` taken during the stalls. We can capture events2 on both sides and the `drbdsetup show` of R1/R2
-(two paths per connection) on the next occurrence, or provide anything else you need.
+`drbdsetup status` taken during the stalls. We will capture B's lines, events2 on both sides and the `drbdsetup show` of
+R1/R2 (two paths per connection) on the next occurrence, before any recovery, and add them here.
 
 ## Questions
 
