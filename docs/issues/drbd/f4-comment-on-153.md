@@ -29,6 +29,8 @@ What stands out:
 - vol1 of the same resource had 77655 bits on A toward B; there the bitmap was simply cleared ("cleared bm UUID and bitmap") with no resync.
 - Quorum was held by A and the diskless members throughout ("Would lose quorum, but using tiebreaker logic to keep").
 
+The whole-device bitmap may be the drbdmeta case described in the previous comment (attach without the bitmap provenance feature, so all out-of-sync bits count as set); our excerpt starts at the disconnect and does not show A's last attach, so we cannot confirm it from these lines.
+
 As in this issue, the reconciliation picks the side to sync from stale bits and ignores which side is current. Here it cost redundancy (A Inconsistent next to a node being deleted) rather than the Primary's I/O. Where would a whole-device bitmap toward a just-disconnected peer come from? And should a node that is UpToDate and connected to the Primary ever be chosen as SyncTarget by this rule?
 
 Related: #145 and #154 (the same `rule=lost-quorum` on rejoin).
