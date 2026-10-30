@@ -8,7 +8,7 @@ Question (from the u18r8 measurement, 6-6.5 s per clone regardless of parallelis
 
 1. Each clone step is a `scopeRunner.fluxInTransactionalScope(..., lockGuard(read NODES_MAP, write
    RSC_DFN_MAP), callable)`: `setCloneSnapshotProperty` (`CtrlRscDfnApiCallHandler.java:1006-1016`),
-   `resumeIOAndClearCloneProp` (`:1082-1093`), `removeStartCloning` (`:1146-1155`, write on
+   `resumeIOAndClearCloneProp` (`:1082-1093`), `removeStartCloning` (`:1143-1152`, write on
    `RSC_DFN_MAP` and `NODES_MAP`). The callable changes props/flags, calls `ctrlTransactionHelper.commit()`
    and returns `ctrlSatelliteUpdateCaller.updateSatellites(rscDfn, …)` as a Flux.
 2. `ScopeRunner.doInScope` (`server/.../apicallhandler/ScopeRunner.java:156-208`) takes the lock, runs
@@ -26,7 +26,7 @@ notice building). Many clones still serialise on these short sections, because t
 
 ## More likely: the step chain on the satellites
 
-`cloneRscDfn` (`:1594-1712`) chains, per clone: suspend IO on the source → set the clone-snapshot property
+`cloneRscDfnInTransaction` (`:1463`, chain at `:1690-1704`) chains, per clone: suspend IO on the source → set the clone-snapshot property
 (the satellite creates the CF_ snapshot in a DeviceManager run) → resume IO and clear the property →
 deploy the clone resources (`CLONING_START`) → the satellite's `CloneService` runs `zfs clone` /
 send|receive → `CLONING_FINISHED` notification → `removeStartCloning`. Each arrow is a controller → satellite
@@ -34,7 +34,7 @@ send|receive → `CLONING_FINISHED` notification → `removeStartCloning`. Each 
 thread per satellite. Pending dispatches are batched into the next run (`DeviceManagerImpl.java:915-933`),
 but one run must finish before the next starts, and every run of a ZFS resource pays the listing cost
 (fix 16 reduces that). With about 6 steps, ~1 s per step, from DRBD state changes (suspend/resume) plus the run
-time, gives the measured 6-6.5 s. Parallel clones of the same source share the source satellite's runs.
+time, would give the measured 6-6.5 s (hypothesis, to be confirmed with the logs below). Parallel clones of the same source share the source satellite's runs.
 They get batched but do not shorten each other's chains, which matches "regardless of parallelism".
 
 ## How to confirm on the rack (no patch needed)
