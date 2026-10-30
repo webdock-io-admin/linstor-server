@@ -21,22 +21,24 @@ Resources: R1 (vol0 10 GiB, vol1 0.49 GiB), R2 (vol0 40 GiB, vol1 0.49 GiB).
 
 ## What happens
 
-B was rebooted (firmware updates) three times in a row on 2026-10-30, reconnecting at 09:39, 09:53 and 10:09 CET.
+B was rebooted for firmware updates four times on 2026-10-30. The reconnects described here are at 09:39, 09:53,
+10:09 and 10:33 CET.
 Each time A began a small bitmap resync as SyncSource toward B, a few hundred KB (vol1: 0 KB). Within 50-100 ms a
 second handshake arrived ("Becoming WFBitMapS because primary is diskless"). It was refused with -8 and postponed
 "until current resync finished", and from then on the running resync made no progress:
 
 - A: both volumes `replication:SyncSource peer-disk:Inconsistent`, `out-of-sync:0`, `rs-in-flight:0`,
   `resync-suspended:no`, until the next disconnect (the 10:09 occurrence was still stuck at 10:20).
-- B: R2 vol0 SyncTarget 81.25 % done, out-of-sync 12 KB, rs-in-flight 0, no resync requests issued, and the residue
-  grew (52 → 64 KiB) with the Primary's writes. R1 out-of-sync 0 but still SyncTarget. vol1 of both resources began
+- B: R2 vol0 SyncTarget 81.25 % done, out-of-sync 12 KB, rs-in-flight 0, no resync requests issued. In another
+  stalled round the residue on B grew from 52 to 64 KiB with the Primary's writes. A reported out-of-sync 0 toward B
+  at the same time as B reported a non-zero residue. R1 out-of-sync 0 but still SyncTarget. vol1 of both resources began
   with "will sync 0 KB [0 bits set]" and stayed SyncTarget/Inconsistent; "Resync done" never came (boots lasted
   up to 16 min).
 - No "Deferring resync request" and no "divergence bitmap not cleared yet" on either side.
-- The same two resources hung on all three boots; about 92 other resources on the same pair of nodes finished in
+- The same two resources hung on every boot; about 92 other resources on the same pair of nodes finished in
   1-2 s.
 
-A's kernel log (CET, resource name shortened):
+Logged on A (peer name `B` in the prefix), CET, resource name shortened:
 
 ```
 2026-10-30T10:09:22.156258+01:00 drbd R1/0 drbd1127 B: uuid_compare()=source-use-bitmap by rule=bitmap-self
@@ -53,10 +55,10 @@ A's kernel log (CET, resource name shortened):
 2026-10-30T10:09:22.251731+01:00 drbd R1: State change failed: Can not start OV/resync since it is already active (-8)
 ```
 
-followed by `Failed: repl( SyncSource -> WFBitMapS ) [diskless-primary]` and "...postponing this until current
-resync finished".
+followed on A by `Failed: repl( SyncSource -> WFBitMapS ) [diskless-primary]` and "...postponing this until current
+resync finished" (quoted from our notes; the exact lines with timestamps can be provided).
 
-B's side of an earlier boot (UTC as logged):
+Logged on B (peer name `A` in the prefix), at the 10:33 CET boot, times in UTC as logged:
 
 ```
 2026-10-30T09:33:42.663855+00:00 drbd R1/0 drbd1127 A: Began resync as SyncTarget (will sync 344 KB [86 bits set]).
@@ -71,13 +73,13 @@ B's side of an earlier boot (UTC as logged):
    10:44:18 CET) reconnected and began a 132 KB resync, which stalled again at 89.19 % with out-of-sync 16 KB and
    rs-in-flight 0.
 2. **invalidate while disconnected from the only diskful peer:** on B, `drbdsetup disconnect <res> 1`
-   (10:50:36 CET, rc 0), then `drbdadm invalidate <res>` (10:50:43 CET, rc 0). The only state change is toward
-   the **diskless** D, and no bits are set:
+   (10:50:36 CET, rc 0), then `drbdadm invalidate <res>` (10:50:43 CET, rc 0). Logged on B (UTC): the only state
+   changes are `0->3`, i.e. from B (node-id 0) toward the **diskless** D (node-id 3), and no bits are set:
    ```
    2026-10-30T09:50:43.559854+00:00 drbd R2: Preparing cluster-wide state change 1743608095: 0->3 repl( StartingSyncT )
    2026-10-30T09:50:43.561853+00:00 drbd R2: Preparing cluster-wide state change 3702830413: 0->3 repl( StartingSyncT )
    ```
-   On reconnect the handshake carried `bits:0` and the resync again began with 0 bits:
+   On reconnect (logged on B) the handshake carried `bits:0` and the resync again began with 0 bits:
    ```
    2026-10-30T09:51:16.946038+00:00 drbd R2/0 drbd1123 A: peer 5E261F634751CA62:B868F82AD1C6FAC6:8B94AA4977C17F88:D3E449FA5A1B6350 bits:0 flags:1100
    2026-10-30T09:51:16.946081+00:00 drbd R2/0 drbd1123 A: uuid_compare()=target-use-bitmap by rule=bitmap-peer
@@ -87,7 +89,7 @@ B's side of an earlier boot (UTC as logged):
    An `invalidate` while connected and stuck (10:49:50 CET) also returned rc 0 with only the same two
    `StartingSyncT` state changes, a silent no-op.
 3. **invalidate while connected, with the source named:** `drbdadm invalidate --sync-from-peer-node-id=1 <res>`
-   (10:51:53 CET) returns rc 11:
+   (10:51:53 CET) on B returns rc 11 (logged on B, UTC):
    ```
    2026-10-30T09:51:53.879378+00:00 drbd R2: State change failed: Can not start OV/resync since it is already active (-8)
    2026-10-30T09:51:53.879476+00:00 drbd R2/0 drbd1123 A: Failed: repl( SyncTarget -> StartingSyncT ) [invalidate]
@@ -108,6 +110,13 @@ then "Resync done" with `SyncTarget -> Established [resync-finished]`, then
 and out-of-sync 0, and never adopted the Primary's UUID. A manual disconnect/connect 7 minutes later found 19
 bits (76 KB) and resynced them in 1 s. That `unexpected repl_state` line is the one in #148, which has a different
 trigger (the sync source losing the diskless Primary).
+
+## What we do not have yet
+
+B's kernel lines at the moment of the refused second handshake (10:09:22 CET), and `drbdsetup status --verbose` /
+`drbdsetup events2` captures from both sides while a resync is parked. The A and B status values above are from
+`drbdsetup status` taken during the stalls. We can capture events2 on both sides and the `drbdsetup show` of R1/R2
+(two paths per connection) on the next occurrence, or provide anything else you need.
 
 ## Questions
 
