@@ -81,8 +81,11 @@ The excerpts above show the pattern, not proof of the exact cause. Not a port mi
 ## Experiment (on one of the stuck resources)
 
 1. Single diskless peer (10:20-10:23 CET): C and E were disconnected to StandAlone, on both diskful nodes at the same step. D alone still did not connect within 60 s. Reconnecting C and then E changed nothing. An earlier pass that disconnected only on the diskful side gave the same result. So the loop does not need several peers connecting at once. Once a connection is in it, the loop belongs to that single connection, or to the resource on the diskless side.
-2. One path only (keep one of the two paths on both sides): <result pending>
-3. `connect-int` back to 10 s: <result pending>
+2. One path only (10:25-10:30 CET): the second path was removed on the diskful side (both diskful nodes), and the diskless side kept both paths. No effect: all three diskless peers stayed `Connecting`.
+3. `connect-int 10` on the diskful side (both diskful nodes), same window: no effect.
+
+All changes were restored afterwards. So the peer count, the path count and the retry interval, each changed from the diskful side, do not break the loop.
+4. Disconnect and connect from the diskless side, then `down` and re-adjust: <result pending>
 
 ## What the 9.3.4 source says about the timing (tag drbd-9.3.4, e59b287b1)
 
