@@ -1,4 +1,4 @@
-Title: 9.3.4: connect livelock of a fresh resource — several diskless peers handshake at once, each attempt ends in "Interrupted state change (-21)" / "timeout while waiting for feature packet", retrying in lock-step every ~6 s for hours
+Title: 9.3.4: connect livelock of a fresh resource — diskless peers never connect, each attempt ends in "Interrupted state change (-21)" / "timeout while waiting for feature packet", retrying in lock-step every ~6 s for hours
 
 ## Environment
 
@@ -12,7 +12,7 @@ Title: 9.3.4: connect livelock of a fresh resource — several diskless peers ha
 
 Two of the ~140 resources, created 12.6 s apart (07:07:36.8 and 07:07:49.4 CET), never connected to their diskless peers. On the storage pair both came up UpToDate. Toward every diskless peer, the connection attempt fails and repeats about every 6 s, still looping 3 hours later (85 of 321 kernel lines in 2 min on one diskless node).
 
-The three diskless peers of each resource started their handshakes within the same seconds. Resources whose diskless peers arrived one at a time connected normally (one of them after a single -21).
+The three diskless peers of each resource started their handshakes within the same seconds. Resources whose diskless peers arrived one at a time connected normally (one of them after a single -21). The experiment below shows that the simultaneous arrival is not needed to keep the loop going.
 
 Node ids: storage nodes A = 0, B = 1; diskless C = 2, D = 3, E = 4, F = 5. F connected normally; C, D and E loop.
 
@@ -80,7 +80,9 @@ The excerpts above show the pattern, not proof of the exact cause. Not a port mi
 
 ## Experiment (on one of the stuck resources)
 
-<results pending: (1) disconnect two of the three diskless peers, check whether the remaining one connects, then reconnect the others one at a time; (2) remove one path (keep s0) on both sides; (3) `connect-int` back to 10 s>
+1. Single diskless peer (10:20-10:23 CET): C and E were disconnected to StandAlone, on both diskful nodes at the same step. D alone still did not connect within 60 s. Reconnecting C and then E changed nothing. An earlier pass that disconnected only on the diskful side gave the same result. So the loop does not need several peers connecting at once. Once a connection is in it, the loop belongs to that single connection, or to the resource on the diskless side.
+2. One path only (keep one of the two paths on both sides): <result pending>
+3. `connect-int` back to 10 s: <result pending>
 
 ## What the 9.3.4 source says about the timing (tag drbd-9.3.4, e59b287b1)
 
@@ -91,7 +93,7 @@ The excerpts above show the pattern, not proof of the exact cause. Not a port mi
 
 ## Our reading
 
-A connect livelock, phase-locked across cycles. Each cycle ends either with the diskless side's feature-packet timeout or, when the handshake does succeed, with the diskless side disconnecting in the same millisecond, before B's state change to Connected can complete. The diskful side then aborts its state change to Connected with -21, and both sides reconnect with identical timing, every cycle, for hours. It happened only where several diskless peers connected to a fresh resource in the same seconds. Each connection has two paths, and the tcp transport tries both at connect time. Our guess: the two sides end up with socket pairs from different paths, or one side's pair goes stale. The diskless side then waits out its 2 s feature timeout on a socket the diskful side is not using, When a cycle does complete the handshake, something tears it down within milliseconds; we cannot see what from the logs. The fixed 1 s retry sleep then puts both sides back in the same phase.
+A connect livelock, phase-locked across cycles. Each cycle ends either with the diskless side's feature-packet timeout or, when the handshake does succeed, with the diskless side disconnecting in the same millisecond, before B's state change to Connected can complete. The diskful side then aborts its state change to Connected with -21, and both sides reconnect with identical timing, every cycle, for hours. It started only where several diskless peers connected to a fresh resource in the same seconds, but experiment 1 shows that a single diskless peer stays in the loop once it is in it. Each connection has two paths, and the tcp transport tries both at connect time. Our guess: the two sides end up with socket pairs from different paths, or one side's pair goes stale. The diskless side then waits out its 2 s feature timeout on a socket the diskful side is not using. When a cycle does complete the handshake, something tears it down within milliseconds; we cannot see what from the logs. The fixed 1 s retry sleep then puts both sides back in the same phase.
 
 ## Consequence
 
@@ -107,7 +109,7 @@ The resource is UpToDate on the storage pair but unusable on the compute nodes. 
 1. With the tcp transport and two paths, can `dtt_connect()` return on each side with a socket pair from a different path (or one the peer has already dropped), so that the feature exchange can only time out?
 2. `dtt_wait_for_connect()` has jitter, but the 1 s sleep after a failed handshake in `conn_connect()` (drbd_receiver.c:1352) does not. Would jitter there (or a growing back-off) be acceptable, so that a phase lock like this breaks by itself?
 3. In the cycle where the handshake succeeds on both sides, what makes the diskless side call `conn_disconnect()` in the same millisecond, before the state change to Connected? Can the connect attempt of D's other connection of the same resource (toward A, restarted 0.14 s earlier) interfere with this one? Is there a log level that would show it?
-4. Is there a configuration setting (e.g. a larger `ping-timeout`, `sock-check-timeo` or `connect-int`) that avoids this for a fresh resource with several diskless peers, or a recommended in-band recovery?
+4. Is there a configuration setting (e.g. a larger `ping-timeout`, `sock-check-timeo` or `connect-int`) that avoids this, or a recommended in-band recovery?
 
 Our mitigation: none yet. <pending the experiments above>
 
