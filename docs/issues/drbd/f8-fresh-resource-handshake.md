@@ -120,7 +120,7 @@ In 9.3.4: `conn_disconnect()` calls `drbd_thread_restart_nowait()` on the receiv
 Our logs fit this in every detail:
 - 26-31 µs from "Peer authenticated" to `NetworkFailure [disconnected]`, with no log line in between.
 - About 0.1-0.2 s, not 1 s, from `NetworkFailure` to the next `Connecting`: the thread restarts ("Restarting receiver thread") instead of taking the 1 s `retry:` sleep.
-- Every successful handshake on the diskless side follows feature-packet timeouts inside the same receiver thread run.
+- In every cycle we have, the successful handshake on the diskless side follows feature-packet timeouts inside the same receiver thread run.
 - On the peer: no state-change reply at all, just the closed socket and -21.
 
 ## Our reading
