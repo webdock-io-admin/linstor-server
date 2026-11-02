@@ -85,7 +85,13 @@ The excerpts above show the pattern, not proof of the exact cause. Not a port mi
 3. `connect-int 10` on the diskful side (both diskful nodes), same window: no effect. In that minute the diskful side saw no handshake at all. The diskless side kept `connect-int 3`.
 
 All changes were restored afterwards. So the peer count, the path count and the retry interval, each changed from the diskful side, do not break the loop.
-4. Disconnect and connect from the diskless side, then `down` and re-adjust: <result pending>
+4. From the diskless side D (10:3x CET):
+   a. `drbdsetup disconnect` and `connect` of one connection: still `Connecting` after 60 s.
+   b. `drbdsetup down`, then `drbdadm adjust`: the connection to B came up within 5 s (handshake OK, protocol 125, both volumes UpToDate, quorum regained). The connection to A kept looping with the same feature-packet-timeout cycle, although D's side of it had just been recreated.
+   c. A second `adjust` on D changed nothing.
+
+   So the stuck state is per connection, and it can sit on the diskful end as well. Recreating D's side cleared the connection to B but not the one to A.
+5. Reset of A's side of the A-D connection (disconnect/connect, then adjust): <result pending>
 
 ## What the 9.3.4 source says about the timing (tag drbd-9.3.4, e59b287b1)
 
@@ -114,7 +120,7 @@ The resource is UpToDate on the storage pair but unusable on the compute nodes. 
 3. In the cycle where the handshake succeeds, the diskless side calls `conn_disconnect()` in the same millisecond. Can the connect attempt of D's other connection of the same resource (toward A, restarted 0.14 s earlier) interfere with this one? Is there a log level that would show it?
 4. Is there a configuration setting (e.g. a larger `ping-timeout`, `sock-check-timeo` or `connect-int`) that avoids this, or a recommended in-band recovery?
 
-Our mitigation: none yet. <pending the experiments above>
+Recovery so far: `down` and re-adjust of the resource on the diskless node. That cleared one of its two connections; for the other, see experiment 5. Our mitigation, outside DRBD: when the open of a freshly created diskless resource fails, our provisioning layer recreates the diskless resource instead of retrying the open.
 
 ---
 
