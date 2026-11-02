@@ -6,7 +6,7 @@ Title: 9.3.4: attach of a local disk to a resource in use by a diskless Primary 
 - drbd-utils 9.35.0-1ppa1~noble1
 - Kernel 7.2.11-zabbly+, Ubuntu 24.04, ZFS zvols as backing devices
 - LINSTOR 1.35.2 drives the configuration. Resource options: protocol C, `quorum majority`, `on-no-quorum suspend-io`, `ping-int 3`, `connect-int 3`, `c-min-rate 250M`, two paths per connection.
-- udev: `bcache-tools` (Ubuntu 24.04) installs `69-bcache.rules`, which does not exclude `drbd*`, so `/usr/lib/udev/probe-bcache` reads the first sectors of every new drbd minor.
+- udev: `bcache-tools` 1.0.8-5build1 (Ubuntu 24.04) installs `69-bcache.rules`, which does not exclude `drbd*`, so `/usr/lib/udev/probe-bcache` reads the first sectors of every new drbd minor. Other rules present: `60-persistent-storage.rules`, `65-drbd.rules`.
 
 ## Topology
 
