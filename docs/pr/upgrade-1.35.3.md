@@ -16,7 +16,7 @@ Roles: **CTRL** = controller VM; **A, B** = storage satellites, where **P** is t
 1. Stop all Incus create, delete and clone activity and the test drivers. Check: `linstor r l` shows no transitional states. `linstor err l --since 1h` gives the baseline.
 2. On every node: `apt-cache policy linstor-common linstor-controller linstor-satellite`, then `ls /var/cache/apt/archives/linstor-*1.35.2*`. The 1.35.2 debs must still be in the apt cache for rollback.
 3. On **P**: `ls -l /usr/share/linstor-server/lib/satellite-* /usr/share/linstor-server/lib/server-*` and `dpkg -V linstor-satellite linstor-common`. Note which files are the patched 1.35.2 jars (`dev-16-jars-v2`: satellite `e5a57b74…`, server `3994ef1e…`). Any patched jar whose name the package does not own must be removed at step 3.2.
-4. On **CTRL**: `systemctl stop linstor-controller`, then `linstor-database export-db -c /etc/linstor /root/linstor-db-pre-1.35.3.json.gz`, then `systemctl start linstor-controller`. Check: the file is non-empty and `linstor n l` shows all nodes Online again.
+4. On **CTRL**: `systemctl stop linstor-controller`, then `/usr/share/linstor-server/bin/linstor-database export-db -c /etc/linstor /root/linstor-db-pre-1.35.3.json.gz` (in 1.35.2 it is not on PATH), then `chmod 600 /root/linstor-db-pre-1.35.3.json.gz` (it is written 0644), then `systemctl start linstor-controller`. Check: the file is non-empty and mode 600, and `linstor n l` shows all nodes Online again. Rehearsal on the small test controller: 3.4 s, 114 KB. Expect longer and larger on the rack.
 
 ## 1. Controller
 
@@ -24,7 +24,7 @@ Roles: **CTRL** = controller VM; **A, B** = storage satellites, where **P** is t
 `apt-get install linstor-common=1.35.3-1ppa1~noble1 linstor-controller=1.35.3-1ppa1~noble1`
 `apt-mark hold linstor-common linstor-controller`
 
-Check: `linstor controller version` reports 1.35.3. `linstor n l` shows every satellite as `VERSION_MISMATCH` (expected until step 2).
+Check: `linstor controller version` reports 1.35.3. `linstor n l` shows every satellite as `VERSION_MISMATCH` (expected until step 2). Rehearsal: install 8.8 s, REST API back 0.6 s after it, no migration ran, and node and resource-definition lists were identical before and after. If the API is not back within about 30 s, check `journalctl -u linstor-controller` before going on.
 
 ## 2. Satellites, one at a time (C, D, E, F, then the storage node that is not P, then P)
 
@@ -64,4 +64,4 @@ The package is held, so no apt run replaces the jars. `dpkg -V linstor-satellite
 ## Rollback
 
 - **Patched jars only (P):** `systemctl stop linstor-satellite`, copy the two files back from `/root/stock-1.35.3/`, `systemctl start linstor-satellite`. The fallback build `dev-16-jars-1.35.3` (fix 16 without #545) is also available.
-- **Whole cluster to 1.35.2:** in the same window, reverse order (P and the other storage node, then C-F, then CTRL). On each node: `apt-mark unhold …`, then `apt-get install --allow-downgrades linstor-common=<1.35.2 version> linstor-satellite=<…>` (or `linstor-controller`) from `/var/cache/apt/archives/`, then `apt-mark hold …`. On P, put `dev-16-jars-v2` back. No database restore is needed: 1.35.3 made no SQL/etcd schema change. Keep `/root/linstor-db-pre-1.35.3.json.gz` regardless.
+- **Whole cluster to 1.35.2:** in the same window, reverse order (P and the other storage node, then C-F, then CTRL). On each node: `apt-mark unhold …`, then `apt-get install --allow-downgrades linstor-common=<1.35.2 version> linstor-satellite=<…>` (or `linstor-controller`) from `/var/cache/apt/archives/`, then `apt-mark hold …`. On P, put `dev-16-jars-v2` back. Rehearsal (controller, from the cached debs): 8.9 s, node and resource-definition lists identical afterwards. No database restore is needed: 1.35.3 made no SQL/etcd schema change. Keep `/root/linstor-db-pre-1.35.3.json.gz` regardless.
