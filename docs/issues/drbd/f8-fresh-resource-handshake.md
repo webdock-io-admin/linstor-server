@@ -120,7 +120,7 @@ The resource is UpToDate on the storage pair but unusable on the compute nodes. 
 3. In the cycle where the handshake succeeds, the diskless side calls `conn_disconnect()` in the same millisecond. Can the connect attempt of D's other connection of the same resource (toward A, restarted 0.14 s earlier) interfere with this one? Is there a log level that would show it?
 4. Is there a configuration setting (e.g. a larger `ping-timeout`, `sock-check-timeo` or `connect-int`) that avoids this, or a recommended in-band recovery?
 
-Recovery so far: `down` and re-adjust of the resource on the diskless node. That cleared one of its two connections; for the other, see experiment 5. Our mitigation, outside DRBD: when the open of a freshly created diskless resource fails, our provisioning layer recreates the diskless resource instead of retrying the open.
+Recovery so far: `down` and re-adjust of the resource on the diskless node. That cleared one of its two connections; for the other, see experiment 5. Planned mitigation on our side, outside DRBD: when the open of a freshly created diskless resource fails, recreate that diskless resource instead of retrying the open.
 
 ---
 
