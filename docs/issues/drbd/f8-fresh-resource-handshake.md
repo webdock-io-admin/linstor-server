@@ -111,7 +111,7 @@ The resource is UpToDate on the storage pair but unusable on the compute nodes. 
 
 1. After a successful handshake, what can make the diskless side (higher node-id) close the connection while the diskful side's cluster-wide state change to Connected is still being prepared? In the cycles that end with "timeout while waiting for feature packet" instead, which socket is it waiting on, given that the peer sends its feature packet first?
 2. `dtt_wait_for_connect()` has jitter, but the 1 s sleep after a failed handshake in `conn_connect()` (drbd_receiver.c:1352) does not. Would jitter there (or a growing back-off) be acceptable, so that a phase lock like this breaks by itself?
-3. In the cycle where the handshake succeeds on both sides, what makes the diskless side call `conn_disconnect()` in the same millisecond, before the state change to Connected? Can the connect attempt of D's other connection of the same resource (toward A, restarted 0.14 s earlier) interfere with this one? Is there a log level that would show it?
+3. In the cycle where the handshake succeeds, the diskless side calls `conn_disconnect()` in the same millisecond. Can the connect attempt of D's other connection of the same resource (toward A, restarted 0.14 s earlier) interfere with this one? Is there a log level that would show it?
 4. Is there a configuration setting (e.g. a larger `ping-timeout`, `sock-check-timeo` or `connect-int`) that avoids this, or a recommended in-band recovery?
 
 Our mitigation: none yet. <pending the experiments above>
