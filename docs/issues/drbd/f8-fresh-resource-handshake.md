@@ -1,4 +1,4 @@
-Title: 9.3.4: connect livelock of a fresh resource — diskless peers never connect, each attempt ends in "Interrupted state change (-21)" / "timeout while waiting for feature packet", retrying in lock-step every ~6 s for hours
+Title: 9.3.4: connect livelock of a fresh resource — diskless peers never connect: feature-packet timeouts alternate with successful handshakes torn down at once (the bug b4fa5b19 fixes), in lock-step for hours
 
 ## Environment
 
@@ -72,7 +72,7 @@ D 07:09:02.388  conn( Unconnected -> Connecting )
 D 07:09:08.404  timeout while waiting for feature packet
 ```
 
-In this cycle the feature exchange and authentication succeed on both sides (55.103 / 55.104). D logs "Handshake … successful" only after it has received B's feature packet (drbd_receiver.c:12177). In the same millisecond, D runs `conn_disconnect()`, which logs `NetworkFailure [disconnected]` (:11869). B, which as the lower node-id has just started the cluster-wide state change to Connected, sees the meta connection shut down and aborts with -21. D's log does not say why it disconnected right after a successful handshake. Its complete kernel log for the resource between 55.104 and 55.188 is only the teardown (sender thread restart, `Connection closed`, `disconnected` helper exit 0, `Unconnected -> Connecting`). D's other connection of the same resource, toward A (node-id 0), had gone `Unconnected -> Connecting` 0.14 s earlier (07:08:54.964). D's two connections cycle in near lock-step. In the other cycles, D's feature-packet wait times out. Every retry is "Connecting + 6.0 s, then ~1.1 s to the next Connecting" on both sides, so the phase never drifts. The first cycle after creation waited 10.4 s.
+In this cycle the feature exchange and authentication succeed on both sides (55.103 / 55.104). D logs "Handshake … successful" only after it has received B's feature packet (drbd_receiver.c:12177). In the same millisecond, D runs `conn_disconnect()`, which logs `NetworkFailure [disconnected]` (:11869). B, which as the lower node-id has just started the cluster-wide state change to Connected, sees the meta connection shut down and aborts with -21. D logs no reason. Its complete kernel log for the resource between 55.104 and 55.188 is only the teardown: sender thread restart, `Connection closed`, `disconnected` helper exit 0, receiver thread restart, `Unconnected -> Connecting`. The cause is explained under "Matches an upstream fix" below. In the other cycles, D's feature-packet wait times out, and the next `Connecting` follows about 1.1 s later. After a torn-down handshake it follows 0.08-0.2 s later. D's two connections (toward A and B) cycle in near lock-step, so the phase does not drift. The first cycle after creation waited 10.4 s.
 
 On the wire: the TCP connect to the storage node's listener succeeds, but no feature packet arrives. The diskless side closes after its timeout (FIN-WAIT-2 seen), and at that moment the diskful side logs the -21.
 
@@ -91,18 +91,41 @@ All changes were restored afterwards. So the peer count, the path count and the 
    c. A second `adjust` on D changed nothing.
 
    So the stuck state is per connection, and it can sit on the diskful end as well. Recreating D's side cleared the connection to B but not the one to A.
-5. Reset of A's side of the A-D connection (disconnect/connect, then adjust): <result pending>
+5. Reset of A's side of the A-D connection (disconnect/connect at 10:36:51 CET, adjust at 10:38:07): not recovered. Both windows show the same pattern on D, complete lines for the resource:
+
+   ```
+   10:37:31.155928 Handshake to peer 0 successful: Agreed network protocol version 125
+   10:37:31.156113 Feature flags enabled on protocol level: 0x7ff …
+   10:37:31.156143 Peer authenticated using 20 bytes HMAC
+   10:37:31.156169 conn( Connecting -> NetworkFailure ) [disconnected]
+   10:37:31.164927 Connection closed; helper disconnected exit 0
+   10:37:31.350    conn( Unconnected -> Connecting )
+   ```
+
+   (10:38:16.980941-.981250 identical, 31 µs from the HMAC line to `NetworkFailure`.) A logs "handshake successful", then 7 ms later "sock was shut down by peer" and -21. Neither side logs a prepared, rejected or aborted state change from the peer, a UUID line or a role line. Afterwards D-B is Connected/UpToDate (since experiment 4b), D-A is Connecting/DUnknown, and quorum holds.
 
 ## What the 9.3.4 source says about the timing (tag drbd-9.3.4, e59b287b1)
 
-- After a failed feature exchange, `conn_connect()` goes to `retry:`, calls `conn_disconnect()` and then sleeps a fixed `schedule_timeout_interruptible(HZ)`, 1 s with no jitter (drbd/drbd_receiver.c:1348-1353). That is the ~1.1 s gap we see (about 80 ms of it is the `disconnected` helper).
+- After a failed feature exchange, `conn_connect()` goes to `retry:`, calls `conn_disconnect()` and then sleeps a fixed `schedule_timeout_interruptible(HZ)`, 1 s with no jitter (drbd/drbd_receiver.c:1348-1353). That is the ~1.1 s gap after a feature-packet timeout (about 80 ms of it is the `disconnected` helper).
 - The feature-packet wait is the data socket's receive timeout, set to `ping_timeo * 4 * HZ/10` just before `drbd_do_features()` (drbd_receiver.c:1265), i.e. 2.0 s with the default `ping-timeout 5`. The net `timeout` option is used only as the send timeout and the TLS hello timeout in `dtt_connect()` (drbd/drbd_transport_tcp.c:1337, :1422-1423). So the 6.0 s is not the `timeout` option. It is roughly 4 s inside `dtt_connect()` plus the 2.0 s feature wait.
 - Inside `dtt_connect()`, each `dtt_connection_established()` check sleeps `sock_check_timeo` or `ping_timeo` (0.5 s) (drbd_transport_tcp.c:672-674). `dtt_wait_for_connect()` waits `connect_int` with ±1/7 jitter, i.e. 2.57 or 3.43 s with `connect-int 3` (:759-760). Outgoing sockets use `connect_int` as their send/receive timeout (:504-505), and the first-packet receive uses `ping_timeo * 4` (:872). We have not worked out which combination of these makes the ~4 s. The steady 6.0 s across cycles suggests the same branch is taken every time.
 - Each side sends its feature packet first and then waits for the peer's (`drbd_do_features()`, drbd_receiver.c:12065-12082). A 2 s wait on a working socket pair therefore means that, at that moment, the two sides were not holding the same data socket.
 
+## Matches an upstream fix that is not in 9.3.4
+
+The teardown right after a successful handshake matches b4fa5b19 "drbd: fix spurious NetworkFailure right after a successful handshake" (2026-10-05, on drbd-9.2 and master; no release tag contains it yet). Its description: on a soft handshake failure, `conn_connect()` goes to `retry:`, calls `conn_disconnect()` and loops back to `start:` in the same receiver thread function. `conn_disconnect()` leaves `t_state` at RESTARTING, and only `drbd_thread_setup()` sets it back to RUNNING. The next successful handshake then enters `drbdd()`, whose loop exits at once, and `conn_disconnect()` logs `Connecting -> NetworkFailure` with no error before it.
+
+In 9.3.4: `conn_disconnect()` calls `drbd_thread_restart_nowait()` on the receiver (drbd_receiver.c:12002-12006). `_drbd_thread_stop()` sets RESTARTING and sends no signal when the caller is the thread itself (drbd_main.c:709-719). `drbdd()` loops only `while (get_t_state(&connection->receiver) == RUNNING)` (drbd_receiver.c:11137). `drbd_receiver()` then calls `conn_disconnect()` (:12396-12402), which logs `NetworkFailure [disconnected]` (:11869).
+
+Our logs fit this in every detail:
+- 26-31 µs from "Peer authenticated" to `NetworkFailure [disconnected]`, with no log line in between.
+- About 0.1-0.2 s, not 1 s, from `NetworkFailure` to the next `Connecting`: the thread restarts ("Restarting receiver thread") instead of taking the 1 s `retry:` sleep.
+- Every successful handshake on the diskless side follows feature-packet timeouts inside the same receiver thread run.
+- On the peer: no state-change reply at all, just the closed socket and -21.
+
 ## Our reading
 
-A connect livelock, phase-locked across cycles. Each cycle ends either with the diskless side's feature-packet timeout or, when the handshake does succeed, with the diskless side disconnecting in the same millisecond, before B's state change to Connected can complete. The diskful side then aborts its state change to Connected with -21, and both sides reconnect with identical timing, every cycle, for hours. It started only where several diskless peers connected to a fresh resource in the same seconds, but experiment 1 shows that a single diskless peer stays in the loop once it is in it. Experiment 2 shows it also happens on a single path. When a cycle completes the handshake, the diskful side's cluster-wide state change to Connected is interrupted because the peer closes the connection. So the cause seems to lie in how the diskless peer handles the moment right after a successful handshake: either its reply to the state change, or its own timeout path. Its log does not show which. The fixed 1 s retry sleep then puts both sides back in the same phase.
+Two things alternate. (a) Attempts end with "timeout while waiting for feature packet" after 2.0 s and retry in place, and each such retry leaves the receiver at RESTARTING. (b) The next attempt that completes the handshake is then torn down by the bug that b4fa5b19 fixes. The thread restarts, its next attempts time out again, and the cycle repeats. The fixed 1 s sleep keeps both sides in phase. With b4fa5b19, (b) should become a normal connect, so the loop should end at the first successful handshake. What we cannot explain is (a): why, in these connections, the first attempts after each thread restart keep failing in the feature exchange while the peer is reachable. Recreating the diskless side's resource (experiment 4b) cleared one connection, which fits a fresh start on both ends. The A-D connection stays stuck after resets on either end (4b, 5).
 
 ## Consequence
 
@@ -111,16 +134,17 @@ The resource is UpToDate on the storage pair but unusable on the compute nodes. 
 ## Possibly related
 
 - 82e8fa8de "drbd: lb-tcp: drop the listeners of the paths that lost the connect race" and 919b15f86 "drbd: lb-tcp: hand a control socket back before closing it" (2026-09-24, drbd-9.2 branch, merged into master as 2a205bc1c), not in 9.3.4. We use the plain `tcp` transport, and experiment 2 reproduced the loop on one path, so we list these only for completeness.
+- b4fa5b19 (above).
 - 2a9f6429d "drbd: Fix a distributed loop while establishing the connection" (2018), which quotes the same "short read" / feature-packet lines; already in 9.3.4.
 
 ## Questions
 
-1. After a successful handshake, what can make the diskless side (higher node-id) close the connection while the diskful side's cluster-wide state change to Connected is still being prepared? In the cycles that end with "timeout while waiting for feature packet" instead, which socket is it waiting on, given that the peer sends its feature packet first?
-2. `dtt_wait_for_connect()` has jitter, but the 1 s sleep after a failed handshake in `conn_connect()` (drbd_receiver.c:1352) does not. Would jitter there (or a growing back-off) be acceptable, so that a phase lock like this breaks by itself?
-3. In the cycle where the handshake succeeds, the diskless side calls `conn_disconnect()` in the same millisecond. Can the connect attempt of D's other connection of the same resource (toward A, restarted 0.14 s earlier) interfere with this one? Is there a log level that would show it?
-4. Is there a configuration setting (e.g. a larger `ping-timeout`, `sock-check-timeo` or `connect-int`) that avoids this, or a recommended in-band recovery?
+1. Is b4fa5b19 planned for a 9.3.x release (and a 9.2.x one)? It is the part of this loop that turns a successful handshake into a disconnect.
+2. Independent of that fix: what can make the feature exchange time out (2.0 s, "short read (expected size 8)") on most attempts of a connection whose peer is reachable and answering on the same path, even right after the receiver thread has restarted? Each side sends its feature packet first (`drbd_do_features()`), so a timeout means that this side's data socket was not the one the peer sent on.
+3. The 1 s sleep after a failed handshake in `conn_connect()` (drbd_receiver.c:1352) has no jitter, while `dtt_wait_for_connect()` does. Would jitter or a back-off there be acceptable, so that a phase lock like this one breaks by itself?
+4. Until a release with b4fa5b19: is there a recommended in-band recovery for a connection in this state? Disconnect/connect and adjust on either end did not clear it here; `down` and re-adjust on the diskless side cleared one of two.
 
-Recovery so far: `down` and re-adjust of the resource on the diskless node. That cleared one of its two connections; for the other, see experiment 5. Planned mitigation on our side, outside DRBD: when the open of a freshly created diskless resource fails, recreate that diskless resource instead of retrying the open.
+Recovery so far: `down` and re-adjust of the resource on the diskless node cleared one of its two connections. A reset of the diskful side's end (experiment 5) did not clear the other. Planned mitigation on our side, outside DRBD: when the open of a freshly created diskless resource fails, recreate that diskless resource instead of retrying the open.
 
 ---
 
