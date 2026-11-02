@@ -1,0 +1,81 @@
+From b4fa5b19dbafd6ef740ecc9dca07bdc9beccbe91 Mon Sep 17 00:00:00 2001
+From: Johannes Khoshnazar-Thoma <johannes@johannesthoma.com>
+Date: Mon, 5 Oct 2026 16:38:00 +0200
+Subject: [PATCH] drbd: fix spurious NetworkFailure right after a successful
+ handshake
+
+On a soft handshake failure, conn_connect() goes to retry:, calls
+conn_disconnect() and loops back to start: within the same receiver
+thread function. conn_disconnect() leaves t_state at RESTARTING, and
+only drbd_thread_setup() turns that back into RUNNING. The next
+successful handshake then enters drbdd(), whose loop exits at once,
+and conn_disconnect() logs Connecting -> NetworkFailure without any
+preceding error.
+
+Fix this by adding drbd_thread_consume_restart(), which does what the
+restart path of drbd_thread_setup() does, and calling it in the
+retry: path before looping back.
+
+Signed-off-by: Johannes Khoshnazar-Thoma <johannes@johannesthoma.com>
+Signed-off-by: Philipp Reisner <philipp.reisner@linbit.com>
+---
+ drbd/drbd_int.h      |  1 +
+ drbd/drbd_main.c     | 17 +++++++++++++++++
+ drbd/drbd_receiver.c |  1 +
+ 3 files changed, 19 insertions(+)
+
+diff --git a/drbd/drbd_int.h b/drbd/drbd_int.h
+index 6e4193d7..0f2b163d 100644
+--- a/drbd/drbd_int.h
++++ b/drbd/drbd_int.h
+@@ -2020,6 +2020,7 @@ struct meta_data_on_disk_9;
+ 
+ int drbd_thread_start(struct drbd_thread *thi);
+ void _drbd_thread_stop(struct drbd_thread *thi, int restart, int wait);
++void drbd_thread_consume_restart(struct drbd_thread *thi);
+ #ifdef CONFIG_SMP
+ void drbd_thread_current_set_cpu(struct drbd_thread *thi);
+ #else
+diff --git a/drbd/drbd_main.c b/drbd/drbd_main.c
+index 60d39000..48a45653 100644
+--- a/drbd/drbd_main.c
++++ b/drbd/drbd_main.c
+@@ -701,6 +701,23 @@ int drbd_thread_start(struct drbd_thread *thi)
+ }
+ 
+ 
++/* Like the restart path of drbd_thread_setup(), for a thread restarting in place. */
++void drbd_thread_consume_restart(struct drbd_thread *thi)
++{
++	unsigned long flags;
++	bool restarted = false;
++
++	spin_lock_irqsave(&thi->t_lock, flags);
++	if (thi->t_state == RESTARTING) {
++		thi->t_state = RUNNING;
++		restarted = true;
++	}
++	spin_unlock_irqrestore(&thi->t_lock, flags);
++
++	if (restarted)
++		flush_signals(current);
++}
++
+ void _drbd_thread_stop(struct drbd_thread *thi, int restart, int wait)
+ {
+ 	unsigned long flags;
+diff --git a/drbd/drbd_receiver.c b/drbd/drbd_receiver.c
+index 05863382..4adfea8b 100644
+--- a/drbd/drbd_receiver.c
++++ b/drbd/drbd_receiver.c
+@@ -1278,6 +1278,7 @@ retry:
+ 		mutex_unlock(&connection->mutex[DATA_STREAM]);
+ 	conn_disconnect(connection);
+ 	schedule_timeout_interruptible(HZ);
++	drbd_thread_consume_restart(&connection->receiver);
+ 	goto start;
+ 
+ abort:
+-- 
+2.53.0
+
