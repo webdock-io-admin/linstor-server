@@ -72,7 +72,7 @@ D 07:09:02.388  conn( Unconnected -> Connecting )
 D 07:09:08.404  timeout while waiting for feature packet
 ```
 
-The handshake completes on both sides at the very end of D's wait (55.103 / 55.104). In the same millisecond, D's timeout path wins over its handshake-success path (`NetworkFailure [disconnected]`), and B sees the peer closing (-21). Every retry is "connect + 6.0 s + ~1.1 s" on both sides, so the phase never drifts. The 6.0 s matches the net `timeout` (default 60, i.e. 6.0 s); the first cycle after creation waited 10.4 s.
+In this cycle the feature exchange and authentication succeed on both sides (55.103 / 55.104). D logs "Handshake … successful" only after it has received B's feature packet (drbd_receiver.c:12177). In the same millisecond, D runs `conn_disconnect()`, which logs `NetworkFailure [disconnected]` (:11869). B, which as the lower node-id has just started the cluster-wide state change to Connected, sees the meta connection shut down and aborts with -21. D's log does not say why it disconnected right after a successful handshake. In the other cycles, D's feature-packet wait times out. Every retry is "Connecting + 6.0 s, then ~1.1 s to the next Connecting" on both sides, so the phase never drifts. The first cycle after creation waited 10.4 s.
 
 On the wire: the TCP connect to the storage node's listener succeeds, but no feature packet arrives. The diskless side closes after its timeout (FIN-WAIT-2 seen), and at that moment the diskful side logs the -21.
 
@@ -82,9 +82,16 @@ The excerpts above show the pattern, not proof of the exact cause. Not a port mi
 
 <results pending: (1) disconnect two of the three diskless peers, check whether the remaining one connects, then reconnect the others one at a time; (2) remove one path (keep s0) on both sides; (3) `connect-int` back to 10 s>
 
+## What the 9.3.4 source says about the timing (tag drbd-9.3.4, e59b287b1)
+
+- After a failed feature exchange, `conn_connect()` goes to `retry:`, calls `conn_disconnect()` and then sleeps a fixed `schedule_timeout_interruptible(HZ)`, 1 s with no jitter (drbd/drbd_receiver.c:1348-1353). That is the ~1.1 s gap we see (about 80 ms of it is the `disconnected` helper).
+- The feature-packet wait is the data socket's receive timeout, set to `ping_timeo * 4 * HZ/10` just before `drbd_do_features()` (drbd_receiver.c:1265), i.e. 2.0 s with the default `ping-timeout 5`. The net `timeout` option is used only as the send timeout and the TLS hello timeout in `dtt_connect()` (drbd/drbd_transport_tcp.c:1337, :1422-1423). So the 6.0 s is not the `timeout` option. It is roughly 4 s inside `dtt_connect()` plus the 2.0 s feature wait.
+- Inside `dtt_connect()`, each `dtt_connection_established()` check sleeps `sock_check_timeo` or `ping_timeo` (0.5 s) (drbd_transport_tcp.c:672-674). `dtt_wait_for_connect()` waits `connect_int` with ±1/7 jitter, i.e. 2.57 or 3.43 s with `connect-int 3` (:759-760). Outgoing sockets use `connect_int` as their send/receive timeout (:504-505), and the first-packet receive uses `ping_timeo * 4` (:872). We have not worked out which combination of these makes the ~4 s. The steady 6.0 s across cycles suggests the same branch is taken every time.
+- Each side sends its feature packet first and then waits for the peer's (`drbd_do_features()`, drbd_receiver.c:12065-12082). A 2 s wait on a working socket pair therefore means that, at that moment, the two sides were not holding the same data socket. With two paths, the two sides could each come out of `dtt_connect()` with a different socket pair.
+
 ## Our reading
 
-A connect livelock, phase-locked across cycles. The feature exchange takes the whole net `timeout` window, the handshake completes on both sides at its very end, and the diskless side's timeout fires in the same millisecond and wins. The diskful side then aborts its state change to Connected with -21, and both sides reconnect with identical timing, every cycle, for hours. It happened only where several diskless peers connected to a fresh resource in the same seconds. Each connection has two paths, and the tcp transport tries both at connect time. Our guess: the handshake completes on one path while the attempt on the other path waits for its feature packet; when that wait hits `timeout` (6 s), it tears down the connection the first path has just completed, in lock-step every cycle.
+A connect livelock, phase-locked across cycles. Each cycle ends either with the diskless side's feature-packet timeout or, when the handshake does succeed, with the diskless side disconnecting in the same millisecond, before B's state change to Connected can complete. The diskful side then aborts its state change to Connected with -21, and both sides reconnect with identical timing, every cycle, for hours. It happened only where several diskless peers connected to a fresh resource in the same seconds. Each connection has two paths, and the tcp transport tries both at connect time. Our guess: the two sides end up with socket pairs from different paths, or one side's pair goes stale. The diskless side then waits out its 2 s feature timeout on a socket the diskful side is not using, When a cycle does complete the handshake, something tears it down within milliseconds; we cannot see what from the logs. The fixed 1 s retry sleep then puts both sides back in the same phase.
 
 ## Consequence
 
@@ -97,9 +104,10 @@ The resource is UpToDate on the storage pair but unusable on the compute nodes. 
 
 ## Questions
 
-1. Why does the feature exchange take the whole net `timeout`? With two paths, can the attempt on the losing path tear down the connection the other path has just established?
-2. When the handshake succeeds in the same millisecond as the feature-packet timeout fires, should the success win? And should the reconnect cycle have jitter, so that such a phase lock breaks by itself?
-3. Is there a configuration setting (e.g. a larger `timeout` or `connect-int`) that avoids this for a fresh resource with several diskless peers, or a recommended in-band recovery?
+1. With the tcp transport and two paths, can `dtt_connect()` return on each side with a socket pair from a different path (or one the peer has already dropped), so that the feature exchange can only time out?
+2. `dtt_wait_for_connect()` has jitter, but the 1 s sleep after a failed handshake in `conn_connect()` (drbd_receiver.c:1352) does not. Would jitter there (or a growing back-off) be acceptable, so that a phase lock like this breaks by itself?
+3. In the cycle where the handshake succeeds on both sides, what makes the diskless side call `conn_disconnect()` in the same millisecond, before the state change to Connected? Is there a log level that would show it?
+4. Is there a configuration setting (e.g. a larger `ping-timeout`, `sock-check-timeo` or `connect-int`) that avoids this for a fresh resource with several diskless peers, or a recommended in-band recovery?
 
 Our mitigation: none yet. <pending the experiments above>
 
