@@ -1,4 +1,4 @@
-Follow-up with a concurrency sweep on 1.35.2. The timings are from storage node P, which runs 1.35.2 with #561 and #554 (ZFS listing scope, destroy retry). Its peer storage node runs stock 1.35.2 and clones its own replica in parallel. Neither patch touches how clone steps are scheduled per cycle. 40 clones of one 10 GiB source per cell, at client concurrency 1, 2, 4 and 8:
+Follow-up with a concurrency sweep on 1.35.2. The timings are from storage node P, which runs 1.35.2 with #561 (ZFS listing scope) and #554 (ZFS destroy retry for #545). Its peer storage node runs stock 1.35.2 and clones its own replica in parallel. Neither patch touches how clone steps are scheduled per cycle. 40 clones of one 10 GiB source per cell, at client concurrency 1, 2, 4 and 8:
 
 | Concurrency | Throughput (clones/min) | Client latency p50 / p99 | Per clone (p50 / concurrency) |
 |---|---|---|---|
