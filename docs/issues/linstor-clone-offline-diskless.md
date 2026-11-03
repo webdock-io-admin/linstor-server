@@ -2,7 +2,7 @@ Title: Clone fails when a node holding only a DISKLESS resource of the source re
 
 **Environment:** LINSTOR 1.35.2 (same code in v1.35.3), ZFS_THIN, `UseZFSClone`. Clones are made from image resource definitions, which have diskful replicas on two storage nodes and diskless resources on the compute nodes that have used them.
 
-**What happened (2026-11-02/03, times CET):** at 11:26-11:30 one compute node C, which holds only a DISKLESS resource of the image's resource definition, was offline for a reboot. During that time, three `resource-definition clone` requests from that image failed. The controller's error reports (6AE34079-00000-000205, -206, -207) say "No connection to satellite '<C>'". The clients saw only a decode error of the error body (see LINBIT/golinstor#22 and #560). Both storage nodes holding the data were online.
+**What happened (2026-11-03, times CET):** at 11:26-11:30 one compute node C, which holds only a DISKLESS resource of the image's resource definition, was offline for a reboot. During that time, three `resource-definition clone` requests from that image failed. The controller's error reports (6AE34079-00000-000205, -206, -207) say "No connection to satellite '<C>'". The clients saw only a decode error of the error body (see LINBIT/golinstor#22 and #560). Both storage nodes holding the data were online.
 
 **Code path (v1.35.3, `CtrlRscDfnApiCallHandler`):**
 - `cloneRscDfnInTransaction()` collects every resource of the source resource definition (`iterateResource()`, :1584-1588). `removeInactiveResources()` drops only `INACTIVE` ones (:1396-1399), so diskless resources stay in. For each of them it runs `failIfWrongRscState()` and `setSuspendIO()` (:1591-1596).
