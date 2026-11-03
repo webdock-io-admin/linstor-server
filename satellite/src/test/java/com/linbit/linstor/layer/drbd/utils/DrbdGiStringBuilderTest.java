@@ -79,4 +79,33 @@ public class DrbdGiStringBuilderTest
         assertThat(new DrbdGiStringBuilder().getCurrentUuid()).isNull();
         assertThat(new DrbdGiStringBuilder().isUpToDate()).isFalse();
     }
+
+    @Test
+    public void currentUuidOnlyHasNoPeerSlotData()
+    {
+        // the GI DrbdLayer uses for the other node-ids when skipping the initial sync
+        assertThat(new DrbdGiStringBuilder().withCurrentUUID(CURRENT).hasPeerSlotData()).isFalse();
+        assertThat(new DrbdGiStringBuilder().hasPeerSlotData()).isFalse();
+        assertThat(
+            new DrbdGiStringBuilder()
+                .withCurrentUUID(CURRENT)
+                .withYoungerUUID(YOUNGER)
+                .withConsistent(true)
+                .withUpToDate(true)
+                .hasPeerSlotData()
+        ).isFalse();
+    }
+
+    @Test
+    public void bitmapUuidIsPeerSlotData()
+    {
+        // the GI DrbdLayer uses for the other node-ids when the local satellite won the UpToDate race
+        assertThat(new DrbdGiStringBuilder().withBitmapBaseDataUUID(BITMAP).hasPeerSlotData()).isTrue();
+    }
+
+    @Test
+    public void peerOutdatedFlagIsPeerSlotData()
+    {
+        assertThat(new DrbdGiStringBuilder().withPeerDiskWasOutdateOrInconsistent(true).hasPeerSlotData()).isTrue();
+    }
 }
