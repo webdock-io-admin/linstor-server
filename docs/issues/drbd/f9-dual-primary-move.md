@@ -2,9 +2,9 @@ Title: 9.3.4: after a conflicting write in the allow-two-primaries window of a l
 
 ## Environment
 
-- DRBD kernel module 9.3.4 (api:2/proto:118-125), GIT-hash e59b287b199f7224468af85b68a10e83c68213f5, drbd-dkms 9.3.4-1ppa1~noble1, plus b4fa5b19 on <which nodes>. drbd-utils 9.35.0-1ppa1~noble1.
+- DRBD kernel module 9.3.4 (api:2/proto:118-125), GIT-hash e59b287b199f7224468af85b68a10e83c68213f5, drbd-dkms 9.3.4-1ppa1~noble1 on S, T and B. A runs 9.3.4 + b4fa5b19 (the fix for the spurious NetworkFailure after a handshake, see #160). drbd-utils 9.35.0-1ppa1~noble1.
 - Kernel 7.2.11-zabbly+, Ubuntu 24.04. LINSTOR 1.35.2 generates the configuration. `allow-two-primaries yes` is set for the duration of a VM live migration. `quorum majority`.
-- Nodes: source S (Primary, VM running), target T (promoted for the migration), and storage nodes A and B (diskful). <role mapping to confirm>
+- Nodes: S, the migration source, and T, the migration target, are both diskless. A and B are diskful storage nodes. Before the move, S was Primary with the VM running; T promoted for the migration. There is no S-T connection: the diskless nodes do not connect to each other.
 
 ## What happened (times CET)
 
@@ -15,17 +15,17 @@ First, what caused it, and that it is on our side: the hypervisor's source host 
 3. Both Primaries generate a new current UUID, giving two generations.
 4. Afterwards the log shows five `Refusing to be Outdated while Connected (-6)` (`SS_CONNECTED_OUTDATES`, drbd_state.c:2297) and three `FATAL: Local commit of prepared <tid> failed!` (drbd_receiver.c:9319).
 5. The reconnect is `Declined by peer` (drbd_state.c:5614) because of the diverged exposed UUID. See also #157 for exposed-UUID handling on reconnect.
-6. Each of the four nodes lost a different connection.
+6. Exactly two connections went StandAlone, both ways. S-A: A declined S's diverged exposed UUID. T-B: B shut the meta connection after the protocol error, and T saw the disconnect. S-B, T-A and A-B stayed Connected, with B's disk Outdated as seen from A.
 
 <excerpts per node, from the evidence once pushed>
 
 ## Repair: a SyncTarget that stays Inconsistent
 
-During the repair, one node X was SyncTarget from the only UpToDate peer, while its own connection to the Primary was StandAlone and the Primary kept writing through that UpToDate peer.
+After the move, T was the only Primary, with the VM running, and A the only UpToDate node. B was the SyncTarget from A, while B's own connection to T was StandAlone (step 6). T kept writing through A.
 
 - The handshake toward the UpToDate peer stays at `Ignore Split-Brain, for now, at least one side unstable` (drbd_receiver.c:6729-6732, strategy forced to `NO_SYNC`). So `drbdadm connect --discard-my-data` has no effect.
-- A full `drbdadm invalidate` resync completes with `Peer was unstable during resync` (drbd_sender.c:2061). X stays `Inconsistent` indefinitely, and the resync-finished UUID is not adopted.
-- It resolved only after the connection between X and the Primary came up and a second `invalidate` ran.
+- A full `drbdadm invalidate` resync completes with `Peer was unstable during resync` (drbd_sender.c:2061). B stays `Inconsistent` indefinitely, and the resync-finished UUID is not adopted.
+- It resolved only after the T-B connection came up and a second `invalidate` ran.
 
 ## Questions
 
