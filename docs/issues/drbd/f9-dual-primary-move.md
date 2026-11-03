@@ -63,6 +63,8 @@ After the move, T was the only Primary, with the VM running, and A the only UpTo
 - A full `drbdadm invalidate` resync completes with `Peer was unstable during resync` (drbd_sender.c:2061). B stays `Inconsistent` indefinitely, and the resync-finished UUID is not adopted.
 - It resolved only after the T-B connection came up and a second `invalidate` ran.
 
+See also #158, a different trigger with the same end state: a SyncTarget that stays `Inconsistent`, and `invalidate` cannot recover it.
+
 ## Questions
 
 1. Are the `FATAL: Local commit of prepared/already committed … failed!` messages expected after a ProtocolError on concurrent writes between two Primaries, or do they point to a state-machine problem? Note that one tid (2194040359) is "already committed" on A and "prepared" on B.
