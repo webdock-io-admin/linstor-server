@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ~6 MB of dependencies (and their CVE exposure) from the distribution
 - DRBD: Operations that take a resource down (e.g. delete, deactivate, rollback) are also rejected while its
   device is open on a Secondary, if DRBD reports it
+- Satellite: when skipping the initial sync of a new DRBD volume, `drbdmeta set-gi` now runs only for the local
+  node-id instead of all 32, as the GI for the other node-ids carries no per-slot data in that case
 
 ### Fixed
 
