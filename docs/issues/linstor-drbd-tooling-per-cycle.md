@@ -34,7 +34,7 @@ We have a small patch that skips the other node-ids when their GI carries no per
 1. Is the set-gi reduction for the skip-init-sync branch acceptable? Should we open the PR?
 2. For the whole-node calls: would you accept restricting `drbdsetup status` to the resources of the cycle, and `sh-list-adjustable` to those resources? Or a per-resource config (`drbdadm -c`) for `adjust`? Or is there a reason they must cover all resources?
 
-Related: #561 (ZFS listings), #562 (clone bursts: about 8 DeviceManager cycles per clone, and the cycle cost grows with the object count).
+Related: #561 (ZFS listings), #562 (clone bursts: about 8 DeviceManager cycles per clone, and the cycle cost grows with the object count), #556 (day-0 GI for a thin replica added later, which touches the same `createMetaData()` code).
 
 ---
 
