@@ -23,7 +23,7 @@ The last line shows node-id and minor per call.
 
 The GI argument is the last argv element:
 - `<day0>:::::` means skip-init, other node-ids. These are the calls that disappear.
-- `:<day0>:::::` means race winner, other node-ids. These must still be there.
+- `:<day0>::::` means race winner, other node-ids. These must still be there.
 
 ## Metadata equivalence
 
