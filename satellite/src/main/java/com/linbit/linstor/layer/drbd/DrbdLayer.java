@@ -1594,8 +1594,16 @@ public class DrbdLayer implements DeviceLayer
 
                 MinorNumber minorNr = drbdVlmData.getVlmDfnLayerObject().getMinorNr();
                 final int localNodeId = drbdRscData.getNodeId().value;
+                // drbdmeta's set-gi writes the current UUID, history and flags of the device itself, and only
+                // the bitmap UUID and peer flags into the slot of the given node-id. If the GI for the other
+                // node-ids carries no per-slot data, their set-gi calls repeat what the local one writes.
+                final boolean setGiOnOtherNodeIds = otherNodeIdGiBuilder.hasPeerSlotData();
                 for (int nodeId = 0; nodeId <= NodeId.NODE_ID_MAX; nodeId++)
                 {
+                    if (nodeId != localNodeId && !setGiOnOtherNodeIds)
+                    {
+                        continue;
+                    }
                     drbdUtils.setGi(
                         new NodeId(nodeId),
                         minorNr,

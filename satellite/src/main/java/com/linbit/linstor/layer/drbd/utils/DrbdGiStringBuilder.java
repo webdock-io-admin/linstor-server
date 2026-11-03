@@ -100,6 +100,16 @@ public class DrbdGiStringBuilder
         return this;
     }
 
+    /**
+     * Returns true if the GI string sets a field that drbdmeta stores per peer slot (the bitmap UUID or the peer
+     * flags), i.e. if a set-gi with this GI has a different effect for each node-id.
+     * A new setter for a per-slot field (e.g. peer connected or full-sync) must be added here as well.
+     */
+    public boolean hasPeerSlotData()
+    {
+        return bitmapBaseDataUuid != null || peerDiskWasOutdatedOrInconsistent;
+    }
+
     public @Nullable String getCurrentUuid()
     {
         return currentUuid;
