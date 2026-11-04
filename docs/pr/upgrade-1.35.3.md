@@ -69,12 +69,13 @@ Check before the next node:
 
 After the last node, the hashes of `linstor n l` and `linstor rd l` (names and properties) match step 0.4.
 
-## 3. Node-P test: v3 jars (`dev-16-jars-1.35.3-v3`)
+## 3. Node-P test: v3 jars (`dev-16-jars-1.35.3-v3-r2`; the first v3 upload lacked the version metadata)
 
 1. **Control cell first**, on stock 1.35.3: one create-rate cell (~50 clones at the current object count). Also count the set-gi calls per skip-init volume; expect 32.
 2. Check the jars against the release: `sha256sum -c SHA256SUMS`.
-   - satellite-1.35.3-4-b2f114305.jar: `4b4a5497aa444286167651034b622f831b0b793c7558eaccb6db5f1df6245021`
-   - server-1.35.3-4-b2f114305.jar: `4c3c017fae8f170d53130b24be21b2a61fa2bf424c9748fa4f645a138e1c4a48`
+   - satellite-1.35.3-4-b2f114305.jar: `21cdeb94fb0d65955c422b8f7ba5a0069a2be50446710fe045e207517bfdc3d7`
+   - server-1.35.3-4-b2f114305.jar: `7f593a360b8afb66e5e75ddbe053960b076ddc499a90bbe68a21b4e85fd5d1aa`
+   - `unzip -p server-1.35.3-4-b2f114305.jar version-info.properties` shows `version=1.35.3-4-b2f114305`.
 3. Swap: `systemctl stop linstor-satellite`. Copy the stock `lib/satellite-1.35.3.jar` and `lib/server-1.35.3.jar` to `/root/stock-1.35.3/`. Overwrite **those two files, keeping those names**, with the v3 jars. Then `systemctl start linstor-satellite`. Stop, copy, start, so that the satellite never runs with mixed jars.
 4. Check:
    - `sha256sum /usr/share/linstor-server/lib/{satellite,server}-1.35.3.jar` gives the two v3 hashes.
@@ -96,5 +97,5 @@ The package is held, so no apt run replaces the jars. `dpkg -V linstor-satellite
 
 ## Rollback, per node
 
-- **v3 → stock jars (P or A):** `systemctl stop linstor-satellite`, copy the two files back from `/root/stock-1.35.3/`, `systemctl start linstor-satellite`. There is no data change: fix 20 only drops redundant set-gi calls. Alternatives: `dev-16-jars-1.35.3-v2` (fix 16 + #545 without fix 20) or `dev-16-jars-1.35.3` (fix 16 only).
+- **v3 → stock jars (P or A):** `systemctl stop linstor-satellite`, copy the two files back from `/root/stock-1.35.3/`, `systemctl start linstor-satellite`. There is no data change: fix 20 only drops redundant set-gi calls. Do **not** use `dev-16-jars-1.35.3` (v1), `-v2` or `-v3` as an alternative. Their server jar has no `version-info.properties`, so the satellite reports `<Unknown>` and the controller rejects it. Use `dev-16-jars-1.35.3-v3-r2` for the test and stock for rollback.
 - **1.35.3 → 1.35.2:** in reverse order (P and A, then C-F, then CTRL), one node at a time. On each: `apt-mark unhold …` → `dpkg -i` the kept 1.35.2 debs (`/var/cache/apt/archives/` or `/root/debs-1.35.2/`) → `apt-mark hold …`. On P, put `dev-16-jars-v2` back, the only patched jars for 1.35.2. Rehearsal (controller): 8.9 s, API back in 0.4 s, node and resource-definition lists identical. No database restore is needed, because 1.35.3 made no SQL/etcd schema change. If the database is ever suspect, `linstor-database import-db` from the export in step 0.5.
