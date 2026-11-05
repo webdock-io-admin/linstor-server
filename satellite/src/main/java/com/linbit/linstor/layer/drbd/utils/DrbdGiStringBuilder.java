@@ -110,6 +110,16 @@ public class DrbdGiStringBuilder
         return bitmapBaseDataUuid != null || peerDiskWasOutdatedOrInconsistent;
     }
 
+    /**
+     * Returns the bitmap UUID if it is the only field this GI sets (":&lt;uuid&gt;::::"), otherwise null.
+     */
+    public @Nullable String getBitmapUuidIfOnlyField()
+    {
+        boolean onlyBitmapUuid = bitmapBaseDataUuid != null && currentUuid == null && youngerHistoryUuid == null &&
+            !consistent && !upToDate && !peerDiskWasOutdatedOrInconsistent;
+        return onlyBitmapUuid ? bitmapBaseDataUuid : null;
+    }
+
     public @Nullable String getCurrentUuid()
     {
         return currentUuid;

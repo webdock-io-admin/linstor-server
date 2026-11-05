@@ -53,6 +53,7 @@ import com.linbit.linstor.layer.drbd.resfiles.ConfFileBuilder;
 import com.linbit.linstor.layer.drbd.resfiles.DrbdResourceFileUtils;
 import com.linbit.linstor.layer.drbd.utils.DrbdAdm;
 import com.linbit.linstor.layer.drbd.utils.DrbdGiStringBuilder;
+import com.linbit.linstor.layer.drbd.utils.DrbdMdV09PeerBitmapUuids;
 import com.linbit.linstor.layer.drbd.utils.MdSuperblockBuffer;
 import com.linbit.linstor.layer.drbd.utils.WindowsFirewall;
 import com.linbit.linstor.logging.ErrorReporter;
@@ -83,6 +84,7 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -1593,9 +1595,11 @@ public class DrbdLayer implements DeviceLayer
                 // the bitmap UUID and peer flags into the slot of the given node-id. If the GI for the other
                 // node-ids carries no per-slot data, their set-gi calls repeat what the local one writes.
                 final boolean setGiOnOtherNodeIds = otherNodeIdGiBuilder.hasPeerSlotData();
+                final boolean otherNodeIdsWritten = setGiOnOtherNodeIds &&
+                    writeOtherNodeIdsAtOnce(drbdVlmData, metaDiskPath, internal, localNodeId, otherNodeIdGiBuilder);
                 for (int nodeId = 0; nodeId <= NodeId.NODE_ID_MAX; nodeId++)
                 {
-                    if (nodeId != localNodeId && !setGiOnOtherNodeIds)
+                    if (nodeId != localNodeId && (!setGiOnOtherNodeIds || otherNodeIdsWritten))
                     {
                         continue;
                     }
@@ -1627,6 +1631,43 @@ public class DrbdLayer implements DeviceLayer
         {
             throw new ImplementationError(exc);
         }
+    }
+
+    /**
+     * Writes the other node-ids' bitmap UUID with one superblock write instead of one drbdmeta set-gi per node-id,
+     * if enabled and the GI for the other node-ids only sets the bitmap UUID. The local node-id still gets its
+     * set-gi afterwards; that drbdmeta call reads the superblock written here.
+     *
+     * @return true if the other node-ids are done, false if the caller has to run their set-gi calls
+     */
+    private boolean writeOtherNodeIdsAtOnce(
+        DrbdVlmData<Resource> drbdVlmData,
+        String metaDiskPath,
+        boolean internal,
+        int localNodeId,
+        DrbdGiStringBuilder otherNodeIdGiBuilder
+    )
+    {
+        boolean written = false;
+        @Nullable String bitmapUuid = otherNodeIdGiBuilder.getBitmapUuidIfOnlyField();
+        if (bitmapUuid != null && DrbdMdV09PeerBitmapUuids.isEnabled())
+        {
+            try
+            {
+                DrbdMdV09PeerBitmapUuids.write(Paths.get(metaDiskPath), !internal, localNodeId, bitmapUuid);
+                written = true;
+            }
+            catch (IOException | RuntimeException exc)
+            {
+                errorReporter.reportError(
+                    exc,
+                    null,
+                    "Writing the peer bitmap UUIDs of " + drbdVlmData.getRscLayerObject().getSuffixedResourceName() +
+                        "/" + drbdVlmData.getVlmNr().value + " at once failed, falling back to drbdmeta set-gi"
+                );
+            }
+        }
+        return written;
     }
 
     private boolean hasLocalStltWonUpToDateRace(DrbdVlmData<Resource> drbdVlmDataRef)
