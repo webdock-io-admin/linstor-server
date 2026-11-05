@@ -92,6 +92,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import org.slf4j.event.Level;
 
@@ -115,7 +116,6 @@ public class DrbdLayer implements DeviceLayer
     private final DrbdVersion drbdVersion;
     private final WindowsFirewall windowsFirewall;
 
-    @Nullable private static String drbdSetupStatusOutput;
 
     /**
      * This is a list of resource names (lowercase) that needs to be adjusted, in the devmanager run
@@ -167,18 +167,16 @@ public class DrbdLayer implements DeviceLayer
     )
         throws StorageException, DatabaseException
     {
-        if (drbdSetupStatusOutput == null)
-        {
-            drbdSetupStatusOutput = drbdUtils.drbdSetupStatus();
-        }
-
         List<String> notGeneratedResFiles = regenerateAllResFile(rscDataList);
 
         if (drbdVersion.getUtilsVsn().greaterOrEqual(new ExtToolsInfo.Version(9, 32, 0)))
         {
             try
             {
-                adjustResourcesList = drbdUtils.listAdjustable();
+                List<String> dispatchedRscNames = rscDataList.stream()
+                    .map(AbsRscLayerObject::getSuffixedResourceName)
+                    .collect(Collectors.toList());
+                adjustResourcesList = drbdUtils.listAdjustable(dispatchedRscNames);
                 if (adjustResourcesList != null)
                 {
                     adjustResourcesList.addAll(notGeneratedResFiles);
@@ -227,7 +225,6 @@ public class DrbdLayer implements DeviceLayer
     @Override
     public void clearCache()
     {
-        drbdSetupStatusOutput = null;
         adjustResourcesList = null;
     }
 
@@ -262,7 +259,7 @@ public class DrbdLayer implements DeviceLayer
             deleteDrbd(drbdRscData, apiCallRc);
             if (processChild(drbdRscData, apiCallRc))
             {
-                adjustDrbd(drbdRscData, apiCallRc, true, null);
+                adjustDrbd(drbdRscData, apiCallRc, true);
 
                 // this should not be executed if adjusting the drbd resource fails
                 drbdResFileUtils.copyResFileToBackup(drbdRscData);
@@ -281,7 +278,7 @@ public class DrbdLayer implements DeviceLayer
             }
             else
             {
-                if (adjustDrbd(drbdRscData, apiCallRc, false, drbdSetupStatusOutput))
+                if (adjustDrbd(drbdRscData, apiCallRc, false))
                 {
                     addAdjustedMsg(drbdRscData, apiCallRc);
 
@@ -611,8 +608,7 @@ public class DrbdLayer implements DeviceLayer
     private boolean adjustDrbd(
         DrbdRscData<Resource> drbdRscData,
         ApiCallRcImpl apiCallRc,
-        boolean childAlreadyProcessed,
-        @Nullable String drbdSetupStatus
+        boolean childAlreadyProcessed
     )
         throws StorageException, DatabaseException, ResourceException, VolumeException,
         AbortLayerProcessingException
@@ -703,7 +699,7 @@ public class DrbdLayer implements DeviceLayer
                 // do not try to create meta data while the resource is diskless or skipDisk is enabled
                 for (DrbdVlmData<Resource> drbdVlmData : checkMetaData)
                 {
-                    if (!hasMetaData(drbdVlmData) || needsNewMetaData(drbdVlmData, drbdSetupStatus))
+                    if (!hasMetaData(drbdVlmData) || needsNewMetaData(drbdVlmData))
                     {
                         createMetaData.add(drbdVlmData);
                     }
@@ -1151,16 +1147,15 @@ public class DrbdLayer implements DeviceLayer
         }
     }
 
-    private boolean needsNewMetaData(DrbdVlmData<Resource> drbdVlmData, @Nullable String drbdSetupStatusOut)
+    private boolean needsNewMetaData(DrbdVlmData<Resource> drbdVlmData)
         throws StorageException
     {
-        boolean isRscUp = drbdSetupStatusOut != null ?
-            drbdSetupStatusOut.contains(drbdVlmData.getRscLayerObject().getSuffixedResourceName() + " role:") :
-            drbdUtils.drbdSetupStatusRscIsUp(drbdVlmData.getRscLayerObject().getSuffixedResourceName());
         StateFlags<DrbdRscFlags> flags = drbdVlmData.getRscLayerObject().getFlags();
+        // only this rare flag combination needs to know whether the resource is up. Ask DRBD about this one
+        // resource then, instead of a whole-node "drbdsetup status" in every DeviceManager run
         return flags.isUnset(DrbdRscFlags.INITIALIZED) &&
             flags.isSet(DrbdRscFlags.FORCE_NEW_METADATA) &&
-            !isRscUp;
+            !drbdUtils.drbdSetupStatusRscIsUp(drbdVlmData.getRscLayerObject().getSuffixedResourceName());
     }
 
     private boolean areBothResizeFlagsSet(DrbdVlmData<Resource> drbdVlmData)

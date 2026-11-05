@@ -22,6 +22,7 @@ import com.linbit.linstor.layer.drbd.drbdstate.DrbdEventService;
 import com.linbit.linstor.layer.drbd.drbdstate.DrbdResource;
 import com.linbit.linstor.layer.drbd.drbdstate.DrbdStateTracker;
 import com.linbit.linstor.layer.drbd.drbdstate.ResourceObserver;
+import com.linbit.linstor.logging.ErrorReporter;
 import com.linbit.linstor.storage.StorageException;
 import com.linbit.linstor.storage.data.adapter.drbd.DrbdRscData;
 import com.linbit.linstor.storage.data.adapter.drbd.DrbdVlmData;
@@ -38,13 +39,17 @@ import javax.inject.Singleton;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 @Singleton
@@ -69,19 +74,25 @@ public class DrbdAdm
     private static final long SECONDARY_RETRY_MAX_BACKOFF_MS = 2_000L;
     private static final String DEVICE_HELD_OPEN_ERR_MSG = "Device is held open by someone";
 
+    private final ErrorReporter errorReporter;
     private final ExtCmdFactory extCmdFactory;
     private final StltConfigAccessor stltCfgAccessor;
     private final DrbdEventService drbdEventService;
     private final DrbdVersion drbdVersion;
 
+    private final AtomicBoolean unscopedFallbackLogged = new AtomicBoolean();
+    private final AtomicBoolean scopedLeftoversDeleted = new AtomicBoolean();
+
     @Inject
     public DrbdAdm(
+        ErrorReporter errorReporterRef,
         ExtCmdFactory extCmdFactoryRef,
         StltConfigAccessor stltCfgAccessorRef,
         DrbdEventService drbdEventServiceRef,
         DrbdVersion drbdVersionRef
     )
     {
+        errorReporter = errorReporterRef;
         extCmdFactory = extCmdFactoryRef;
         stltCfgAccessor = stltCfgAccessorRef;
         drbdEventService = drbdEventServiceRef;
@@ -103,9 +114,7 @@ public class DrbdAdm
         List<String> command = new ArrayList<>();
         command.addAll(Arrays.asList(DRBDADM_UTIL, "-vvv", "adjust"));
 
-        // Using -c disables /etc/drbd.d/global_common.conf
-        // command.add("-c");
-        // command.add("/etc/drbd.d/" + resourceName.displayValue + ".res");
+        // "-c" with a scoped config is added below; that config includes global_common.conf (DrbdAdmScopedConf)
 
         if (discard)
         {
@@ -142,9 +151,18 @@ public class DrbdAdm
         // }
         // command.add(resName);
         command.add(drbdRscData.getSuffixedResourceName());
-        // execute(Arrays.asList("drbdsetup", "show", drbdRscData.getSuffixedResourceName()));
-        execute(command);
-        // execute(Arrays.asList("drbdsetup", "show", drbdRscData.getSuffixedResourceName()));
+        try (
+            @Nullable DrbdAdmScopedConf scopedConf = scopedConf(
+                Collections.singletonList(drbdRscData.getSuffixedResourceName())
+            )
+        )
+        {
+            if (scopedConf != null)
+            {
+                command.addAll(1, Arrays.asList("-c", scopedConf.getPath().toString()));
+            }
+            execute(command);
+        }
 
         drbdRscData.setAdjustRequired(false);
     }
@@ -634,36 +652,128 @@ public class DrbdAdm
     }
 
     /**
-     * Calls drbdadm sh-list-adjustable all and returns a lower case list of resources that need to be adjusted.
+     * Calls drbdadm sh-list-adjustable for the given resources and returns a lower case list of resources that need
+     * to be adjusted. Only resources with a resource file are asked about: drbdadm gets a config that includes just
+     * their files, so that it does not parse every resource file on the node.
      * On error exit code != 0, null will be returned
      * @return lower case resource list, except on exit code !=0 null will be returned
      * @throws ExtCmdFailedException if timeout or io exception
      */
-    public @Nullable List<String> listAdjustable() throws ExtCmdFailedException
+    public @Nullable List<String> listAdjustable(Collection<String> suffixedRscNames) throws ExtCmdFailedException
     {
         @Nullable List<String> ret = null;
-        // it isn't worth only specifying our interested resources, as drbdadm will read all files anyway.
-        String[] cmd = new String[]{ DRBDADM_UTIL, "sh-list-adjustable", "all" };
-        ExtCmd utilsCmd = extCmdFactory.create();
-        try
+        @Nullable DrbdAdmScopedConf scopedConf = null;
+        if (canScope())
         {
-            OutputData outputData = utilsCmd.exec(cmd);
-            if (outputData.exitCode == 0)
+            List<Path> resFiles = existingResFiles(suffixedRscNames);
+            if (resFiles.isEmpty())
             {
-                String output = new String(outputData.stdoutData, StandardCharsets.UTF_8);
-                var resLines = output.split("\n");
-                ret = Arrays.stream(resLines).map(String::toLowerCase).collect(Collectors.toList());
+                ret = new ArrayList<>();
+            }
+            else
+            {
+                scopedConf = createScopedConf(resFiles);
             }
         }
-        catch (ChildProcessTimeoutException exc)
+        if (ret == null)
         {
-            throw new ExtCmdFailedException(cmd, exc);
-        }
-        catch (IOException ioExc)
-        {
-            throw new ExtCmdFailedException(cmd, ioExc);
+            String[] cmd = scopedConf == null ?
+                new String[] {DRBDADM_UTIL, "sh-list-adjustable", "all"} :
+                new String[] {DRBDADM_UTIL, "-c", scopedConf.getPath().toString(), "sh-list-adjustable", "all"};
+            try (@Nullable DrbdAdmScopedConf ignored = scopedConf)
+            {
+                ExtCmd utilsCmd = extCmdFactory.create();
+                OutputData outputData = utilsCmd.exec(cmd);
+                if (outputData.exitCode == 0)
+                {
+                    String output = new String(outputData.stdoutData, StandardCharsets.UTF_8);
+                    var resLines = output.split("\n");
+                    ret = Arrays.stream(resLines).map(String::toLowerCase).collect(Collectors.toList());
+                }
+            }
+            catch (ChildProcessTimeoutException exc)
+            {
+                throw new ExtCmdFailedException(cmd, exc);
+            }
+            catch (IOException ioExc)
+            {
+                throw new ExtCmdFailedException(cmd, ioExc);
+            }
         }
         return ret;
+    }
+
+    /**
+     * Returns a drbdadm config limited to the given resources, or null to let drbdadm read /etc/drbd.conf as before
+     * (not Linux, a resource file is missing, or the config could not be written).
+     */
+    private @Nullable DrbdAdmScopedConf scopedConf(Collection<String> suffixedRscNames)
+    {
+        @Nullable DrbdAdmScopedConf ret = null;
+        if (canScope())
+        {
+            List<Path> resFiles = existingResFiles(suffixedRscNames);
+            if (resFiles.size() == suffixedRscNames.size())
+            {
+                ret = createScopedConf(resFiles);
+            }
+        }
+        return ret;
+    }
+
+    private static List<Path> existingResFiles(Collection<String> suffixedRscNames)
+    {
+        return suffixedRscNames.stream()
+            .map(DrbdAdmScopedConf::resFile)
+            .filter(Files::exists)
+            .collect(Collectors.toList());
+    }
+
+    private @Nullable DrbdAdmScopedConf createScopedConf(List<Path> resFiles)
+    {
+        @Nullable DrbdAdmScopedConf ret;
+        try
+        {
+            ret = DrbdAdmScopedConf.create(resFiles);
+        }
+        catch (IOException exc)
+        {
+            logUnscopedFallbackOnce("the scoped drbdadm config could not be written: " + exc.getMessage());
+            ret = null;
+        }
+        return ret;
+    }
+
+    // package-private for tests
+    boolean canScope()
+    {
+        boolean ret = Platform.isLinux();
+        if (ret && !DrbdAdmScopedConf.isStandardLayout())
+        {
+            logUnscopedFallbackOnce(
+                "/etc/drbd.conf or /etc/drbd.d is not the standard layout (drbd.d/global_common.conf and " +
+                    "drbd.d/*.res, with linstor-resources.res as the only .res file)"
+            );
+            ret = false;
+        }
+        if (ret && scopedLeftoversDeleted.compareAndSet(false, true))
+        {
+            // first scoped call since the satellite started: no other scoped config can be in use yet
+            DrbdAdmScopedConf.deleteLeftovers();
+        }
+        return ret;
+    }
+
+    private void logUnscopedFallbackOnce(String reason)
+    {
+        if (unscopedFallbackLogged.compareAndSet(false, true))
+        {
+            errorReporter.logWarning(
+                "drbdadm adjust and sh-list-adjustable read the whole DRBD configuration, because %s. This " +
+                    "warning is logged once.",
+                reason
+            );
+        }
     }
 
 
@@ -695,25 +805,6 @@ public class DrbdAdm
             suffixedRscName,
             Integer.toString(nodeId)
         );
-    }
-
-    public String drbdSetupStatus() throws StorageException
-    {
-        try
-        {
-            OutputData drbdStatusCmd = extCmdFactory.create()
-                .exec("drbdsetup", "status");
-            if (drbdStatusCmd.exitCode != 0)
-            {
-                throw new StorageException(
-                    "Checking drbd state failed: " + new String(drbdStatusCmd.stderrData, StandardCharsets.UTF_8));
-            }
-            return new String(drbdStatusCmd.stdoutData, StandardCharsets.UTF_8);
-        }
-        catch (ChildProcessTimeoutException | IOException exc)
-        {
-            throw new StorageException("Checking drbd state failed", exc);
-        }
     }
 
     public boolean drbdSetupStatusRscIsUp(String rscName) throws StorageException
