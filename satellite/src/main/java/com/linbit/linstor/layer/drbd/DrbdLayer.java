@@ -51,6 +51,7 @@ import com.linbit.linstor.layer.drbd.helper.DrbdadmAdjust;
 import com.linbit.linstor.layer.drbd.helper.ReadyForPrimaryNotifier;
 import com.linbit.linstor.layer.drbd.resfiles.ConfFileBuilder;
 import com.linbit.linstor.layer.drbd.resfiles.DrbdResourceFileUtils;
+import com.linbit.linstor.layer.drbd.utils.BackingDeviceHold;
 import com.linbit.linstor.layer.drbd.utils.DrbdAdm;
 import com.linbit.linstor.layer.drbd.utils.DrbdGiStringBuilder;
 import com.linbit.linstor.layer.drbd.utils.DrbdMdV09PeerBitmapUuids;
@@ -88,6 +89,7 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -615,6 +617,21 @@ public class DrbdLayer implements DeviceLayer
         throws StorageException, DatabaseException, ResourceException, VolumeException,
         AbortLayerProcessingException
     {
+        try (BackingDeviceHold hold = BackingDeviceHold.create(errorReporter))
+        {
+            return adjustDrbd(drbdRscData, apiCallRc, childAlreadyProcessed, hold);
+        }
+    }
+
+    private boolean adjustDrbd(
+        DrbdRscData<Resource> drbdRscData,
+        ApiCallRcImpl apiCallRc,
+        boolean childAlreadyProcessed,
+        BackingDeviceHold hold
+    )
+        throws StorageException, DatabaseException, ResourceException, VolumeException,
+        AbortLayerProcessingException
+    {
         boolean contProcess = true;
         updateRequiresAdjust(drbdRscData);
 
@@ -694,6 +711,13 @@ public class DrbdLayer implements DeviceLayer
 
         if (contProcess)
         {
+            // the backing devices exist now. Keep them open while the drbdmeta / drbdadm calls below run, so that
+            // their closes are not the last close of a zvol, which waits for a txg sync (BackingDeviceHold)
+            if (!drbdRscData.getAbsResource().isDrbdDiskless() && !skipDisk)
+            {
+                hold.add(backingDevices(drbdRscData));
+            }
+
             // hasMetaData needs to be run after child-resource processed
             List<DrbdVlmData<Resource>> createMetaData = new ArrayList<>();
             if (!drbdRscData.getAbsResource().isDrbdDiskless() && !skipDisk)
@@ -1633,6 +1657,20 @@ public class DrbdLayer implements DeviceLayer
         }
     }
 
+    private static List<@Nullable String> backingDevices(DrbdRscData<Resource> drbdRscData)
+    {
+        List<@Nullable String> devices = new ArrayList<>();
+        for (DrbdVlmData<Resource> drbdVlmData : drbdRscData.getVlmLayerObjects().values())
+        {
+            if (drbdVlmData.hasDisk())
+            {
+                devices.add(drbdVlmData.getDataDevice());
+                devices.add(drbdVlmData.getMetaDiskPath());
+            }
+        }
+        return devices;
+    }
+
     /**
      * Writes the other node-ids' bitmap UUID with one superblock write instead of one drbdmeta set-gi per node-id,
      * if enabled and the GI for the other node-ids only sets the bitmap UUID. The local node-id still gets its
@@ -2134,7 +2172,12 @@ public class DrbdLayer implements DeviceLayer
                         int srcMinorNr = drbdSrcVlmData.getVlmDfnLayerObject().getMinorNr().value;
                         int tgtMinorNr = drbdVlmData.getVlmDfnLayerObject().getMinorNr().value;
                         cloneLastKnownBlockDeviceFile(srcMinorNr, tgtMinorNr);
-                        drbdUtils.drbdMetaCheckResize(metaDiskPath, tgtMinorNr);
+                        try (BackingDeviceHold hold = BackingDeviceHold.create(errorReporter))
+                        {
+                            // drbdmeta's close is then not the last close of the clone's zvol (BackingDeviceHold)
+                            hold.add(Collections.singletonList(metaDiskPath));
+                            drbdUtils.drbdMetaCheckResize(metaDiskPath, tgtMinorNr);
+                        }
                     }
                     else
                     {

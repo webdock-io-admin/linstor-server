@@ -92,6 +92,22 @@ public class DrbdMdV09PeerBitmapUuidsDrbdmetaTest
         assertEquals("local node-id " + localNodeId + " " + mdType, loopDump, dumpMd(once, mdType));
     }
 
+    @Test
+    public void drbdmetaWorksWhileTheDeviceIsHeld() throws Exception
+    {
+        // the hold's plain read-only descriptor must not get in the way of drbdmeta (create-md, set-gi, dump-md)
+        Path dev = newDevice("held");
+        try (BackingDeviceHold hold = BackingDeviceHold.createEnabled(org.mockito.Mockito.mock(
+            com.linbit.linstor.logging.ErrorReporter.class)))
+        {
+            hold.add(java.util.Collections.singletonList(dev.toString()));
+            assertEquals(1, hold.getChannels().size());
+            createMd(dev, "internal");
+            setGi(dev, "internal", 0, new DrbdGiStringBuilder().withBitmapBaseDataUUID(DAY0));
+            assertTrue(dumpMd(dev, "internal").contains(DAY0));
+        }
+    }
+
     private Path newDevice(String name) throws IOException
     {
         Path dev = tmpDir.getRoot().toPath().resolve(name + ".img");
