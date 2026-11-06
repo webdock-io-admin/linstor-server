@@ -36,18 +36,34 @@ public class ZfsCommands
 
     public static OutputData list(ExtCmd extCmd, Collection<String> datasets) throws StorageException
     {
-        return genericExecutorLimiter(
-            extCmd,
-            new String[] {
-                "zfs",
-                "list",
-                "-r",   // recursive
+        return list(extCmd, datasets, true);
+    }
+
+    /**
+     * Lists the given volumes and snapshots.
+     *
+     * @param recursive if false, only the given datasets and snapshots are listed, not every snapshot of a volume
+     */
+    public static OutputData list(ExtCmd extCmd, Collection<String> datasets, boolean recursive)
+        throws StorageException
+    {
+        List<String> cmd = new ArrayList<>(Arrays.asList("zfs", "list"));
+        if (recursive)
+        {
+            cmd.add("-r");
+        }
+        cmd.addAll(
+            Arrays.asList(
                 "-H",   // no headers, single tab instead of spaces
                 "-p",   // sizes in bytes
                 // columns: name, referred space, available space, type, extent size, origin, clones
                 "-o", "name,refer,volsize,type,volblocksize,origin,clones",
                 "-t", "volume,snapshot"
-            },
+            )
+        );
+        return genericExecutorLimiter(
+            extCmd,
+            cmd.toArray(new String[0]),
             datasets,
             "Failed to list zfs volumes",
             "Failed to query 'zfs' info",
@@ -508,21 +524,41 @@ public class ZfsCommands
     public static OutputData getUserProperty(ExtCmd extCmdRef, String zfsProp, Collection<String> dataSets)
         throws StorageException
     {
-        return genericExecutorLimiter(
-            extCmdRef,
-            new String[]
-            {
-                "zfs",
-                "get",
-                "-r", // not just the prop from the datasets, but all of their volumes. automatically includes
-                // snapshots
+        return getUserProperty(extCmdRef, zfsProp, dataSets, true);
+    }
+
+    /**
+     * Reads a LINSTOR user property that is set locally on the given datasets.
+     *
+     * @param recursive if false, the property is only read from the given datasets and snapshots
+     */
+    public static OutputData getUserProperty(
+        ExtCmd extCmdRef,
+        String zfsProp,
+        Collection<String> dataSets,
+        boolean recursive
+    )
+        throws StorageException
+    {
+        List<String> cmd = new ArrayList<>(Arrays.asList("zfs", "get"));
+        if (recursive)
+        {
+            // not just the prop from the datasets, but all of their volumes. automatically includes snapshots
+            cmd.add("-r");
+        }
+        cmd.addAll(
+            Arrays.asList(
                 "-o", "name,value",
                 "-H", // no heading
                 "-p", // parsable (exact) numbers
                 "-s", "local", // ZFS also has some property-inheritance. we only want to know if the property is
                 // set directly on the ZFS snapshot/volume, not if a snapshot inherits the property from its volume
                 ZFS_USER_PROP_LINSTOR_PREFIX + zfsProp
-            },
+            )
+        );
+        return genericExecutorLimiter(
+            extCmdRef,
+            cmd.toArray(new String[0]),
             dataSets,
             "Failed to get user property '" + ZFS_USER_PROP_LINSTOR_PREFIX + zfsProp + "'",
             "Failed to get user property '" + ZFS_USER_PROP_LINSTOR_PREFIX + zfsProp + "'",

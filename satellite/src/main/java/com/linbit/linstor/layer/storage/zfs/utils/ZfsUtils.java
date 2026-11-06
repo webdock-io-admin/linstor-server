@@ -89,6 +89,10 @@ public class ZfsUtils
         // properties, will be filled after object is initialized
         public boolean markedForDeletion = false;
 
+        // true if this volume was listed recursively, i.e. "snapshots" holds all of its snapshots. A targeted
+        // (non-recursive) listing only knows the snapshots it was asked for
+        public boolean snapshotsComplete = false;
+
         ZfsInfo(
             String poolNameRef,
             String identifierRef,
@@ -182,18 +186,63 @@ public class ZfsUtils
     )
         throws StorageException
     {
-        final HashMap<String, ZfsInfo> infoByIdentifier = buildZfsInfoMap(extCmdFactoryRef.create(), datasets, kindRef);
-        // the properties are only applied to the entries of infoByIdentifier, so a recursive "zfs get" on the listed
-        // volumes (and on snapshots whose volume was not listed) is enough. Querying the whole zpool instead would
-        // cost time proportional to every volume and snapshot in it.
+        return getZfsList(extCmdFactoryRef, datasets, kindRef, zfsPropertiesWithSetters, true);
+    }
+
+    /**
+     * Lists the given volumes and snapshots and applies the given LINSTOR user properties to them.
+     *
+     * @param recursive if true, every snapshot of the given volumes is listed (cost proportional to their snapshot
+     *     count). If false, only the given volumes and snapshots are listed, plus the origin snapshots of the listed
+     *     volumes; volumes listed this way have {@link ZfsInfo#snapshotsComplete} false.
+     */
+    public static HashMap<String, ZfsInfo> getZfsList(
+        final ExtCmdFactory extCmdFactoryRef,
+        Collection<String> datasets,
+        DeviceProviderKind kindRef,
+        Map<String, BiConsumer<ZfsInfo, String>> zfsPropertiesWithSetters,
+        boolean recursive
+    )
+        throws StorageException
+    {
+        final HashMap<String, ZfsInfo> infoByIdentifier = buildZfsInfoMap(
+            extCmdFactoryRef.create(),
+            datasets,
+            kindRef,
+            recursive
+        );
         Set<String> listedRoots = new TreeSet<>();
-        for (String identifier : infoByIdentifier.keySet())
+        if (recursive)
         {
-            int snapSeparatorIdx = identifier.indexOf('@');
-            if (snapSeparatorIdx == -1 || !infoByIdentifier.containsKey(identifier.substring(0, snapSeparatorIdx)))
+            // the properties are only applied to the entries of infoByIdentifier, so a recursive "zfs get" on the
+            // listed volumes (and on snapshots whose volume was not listed) is enough. Querying the whole zpool instead
+            // would cost time proportional to every volume and snapshot in it.
+            for (String identifier : infoByIdentifier.keySet())
             {
-                listedRoots.add(identifier);
+                int snapSeparatorIdx = identifier.indexOf('@');
+                if (snapSeparatorIdx == -1 || !infoByIdentifier.containsKey(identifier.substring(0, snapSeparatorIdx)))
+                {
+                    listedRoots.add(identifier);
+                }
             }
+        }
+        else
+        {
+            // a clone's origin snapshot is needed when the clone is deleted (cascading deletion), so list it by name
+            Set<String> missingOrigins = new TreeSet<>();
+            for (ZfsInfo zfsInfo : infoByIdentifier.values())
+            {
+                if (zfsInfo.originStr != null && !infoByIdentifier.containsKey(zfsInfo.originStr))
+                {
+                    missingOrigins.add(zfsInfo.originStr);
+                }
+            }
+            if (!missingOrigins.isEmpty())
+            {
+                buildZfsInfoMap(extCmdFactoryRef.create(), missingOrigins, kindRef, false)
+                    .forEach(infoByIdentifier::putIfAbsent);
+            }
+            listedRoots.addAll(infoByIdentifier.keySet());
         }
         for (Entry<String, BiConsumer<ZfsInfo, String>> entry : zfsPropertiesWithSetters.entrySet())
         {
@@ -201,7 +250,8 @@ public class ZfsUtils
                 extCmdFactoryRef.create(),
                 entry.getKey(),
                 listedRoots,
-                Function.identity()
+                Function.identity(),
+                recursive
             );
 
             BiConsumer<ZfsInfo, String> setter = entry.getValue();
@@ -220,11 +270,12 @@ public class ZfsUtils
     private static HashMap<String, ZfsInfo> buildZfsInfoMap(
         final ExtCmd extCmd,
         Collection<String> datasets,
-        DeviceProviderKind kindRef
+        DeviceProviderKind kindRef,
+        boolean recursive
     )
         throws StorageException
     {
-        final OutputData output = ZfsCommands.list(extCmd, datasets);
+        final OutputData output = ZfsCommands.list(extCmd, datasets, recursive);
         final String stdOut = new String(output.stdoutData, StandardCharsets.UTF_8);
 
         final HashMap<String, ZfsInfo> infoByIdentifier = new HashMap<>();
@@ -330,6 +381,7 @@ public class ZfsUtils
                                 originStr.equals("-") ? null : originStr,
                                 clonesStr.equals("-") ? new String[0] : clonesStr.split(",")
                             );
+                            state.snapshotsComplete = recursive && type.equals(ZFS_TYPE_VOLUME);
                             infoByIdentifier.put(identifier, state);
 
                             if (type.equals(ZFS_TYPE_SNAPSHOT))
@@ -406,7 +458,19 @@ public class ZfsUtils
     )
         throws StorageException
     {
-        final OutputData output = ZfsCommands.getUserProperty(extCmdRef, zfsPropRef, dataSetsRef);
+        return getZfsLocalProperty(extCmdRef, zfsPropRef, dataSetsRef, mappingFunctionRef, true);
+    }
+
+    public static <T> Map<String, T> getZfsLocalProperty(
+        ExtCmd extCmdRef,
+        String zfsPropRef,
+        Collection<String> dataSetsRef,
+        Function<String, T> mappingFunctionRef,
+        boolean recursive
+    )
+        throws StorageException
+    {
+        final OutputData output = ZfsCommands.getUserProperty(extCmdRef, zfsPropRef, dataSetsRef, recursive);
         // exit code 1 is allowed for datasets destroyed since they were listed. Any other error (e.g. a faulted or
         // exported pool) must not look like "property not set", or marked datasets would never be cleaned up
         for (final String errLine : StringUtils.split(new String(output.stderrData, StandardCharsets.UTF_8), "\n"))
