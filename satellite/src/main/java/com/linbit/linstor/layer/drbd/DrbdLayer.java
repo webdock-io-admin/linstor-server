@@ -1657,16 +1657,17 @@ public class DrbdLayer implements DeviceLayer
         }
     }
 
-    private static List<@Nullable String> backingDevices(DrbdRscData<Resource> drbdRscData)
+    // package-private for tests
+    static List<@Nullable String> backingDevices(DrbdRscData<Resource> drbdRscData)
     {
+        // not filtered on hasDisk(): that is the kernel's attach state, still false for a new or cloned volume while
+        // its metadata is checked and created and drbdadm attaches it, which is when the hold is needed. Volumes
+        // without a backing device have a null data device, and BackingDeviceHold skips null and missing paths.
         List<@Nullable String> devices = new ArrayList<>();
         for (DrbdVlmData<Resource> drbdVlmData : drbdRscData.getVlmLayerObjects().values())
         {
-            if (drbdVlmData.hasDisk())
-            {
-                devices.add(drbdVlmData.getDataDevice());
-                devices.add(drbdVlmData.getMetaDiskPath());
-            }
+            devices.add(drbdVlmData.getDataDevice());
+            devices.add(drbdVlmData.getMetaDiskPath());
         }
         return devices;
     }
