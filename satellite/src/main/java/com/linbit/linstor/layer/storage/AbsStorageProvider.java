@@ -44,6 +44,7 @@ import com.linbit.linstor.dbdrivers.DatabaseException;
 import com.linbit.linstor.interfaces.StorPoolInfo;
 import com.linbit.linstor.layer.DeviceLayer.NotificationListener;
 import com.linbit.linstor.layer.drbd.DrbdInvalidateUtils;
+import com.linbit.linstor.layer.drbd.utils.BackingDeviceHold;
 import com.linbit.linstor.layer.storage.lvm.LvmProvider;
 import com.linbit.linstor.layer.storage.utils.BlockSizeInfo;
 import com.linbit.linstor.layer.storage.utils.DeviceUtils;
@@ -826,7 +827,10 @@ public abstract class AbsStorageProvider<
 
         if (wipeData)
         {
-            wipeHandler.quickWipe(vlmData.getDevicePath());
+            @Nullable String devicePath = vlmData.getDevicePath();
+            // blockdev, wipefs and the two superblock wipes each open and close the new device; with the hold their
+            // closes are not the last close of a zvol, which waits for a txg sync (BackingDeviceHold)
+            BackingDeviceHold.whileHolding(errorReporter, devicePath, () -> wipeHandler.quickWipe(devicePath));
         }
 
         long allocatedSize = getAllocatedSize(vlmData);

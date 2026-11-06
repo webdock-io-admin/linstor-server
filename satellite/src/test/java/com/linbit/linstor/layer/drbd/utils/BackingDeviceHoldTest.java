@@ -134,4 +134,69 @@ public class BackingDeviceHoldTest
             fail("an unreadable device must be skipped, not thrown: " + exc);
         }
     }
+
+    @Test
+    public void actionRunsWhileTheDeviceIsHeld() throws IOException
+    {
+        String dev = tmpDir.newFile("dev").getPath();
+        BackingDeviceHold hold = BackingDeviceHold.createEnabled(errorReporter);
+        List<Boolean> heldDuringAction = new ArrayList<>();
+        try (hold)
+        {
+            BackingDeviceHold.runHolding(
+                hold,
+                dev,
+                () -> heldDuringAction.add(hold.getChannels().size() == 1 && hold.getChannels().get(0).isOpen())
+            );
+        }
+        assertEquals(Collections.singletonList(true), heldDuringAction);
+        assertTrue(hold.getChannels().isEmpty());
+    }
+
+    @Test
+    public void runHoldingReleasesAndRethrows() throws IOException
+    {
+        String dev = tmpDir.newFile("dev").getPath();
+        long fdsBefore = openFds();
+        BackingDeviceHold hold = BackingDeviceHold.createEnabled(errorReporter);
+        try (hold)
+        {
+            BackingDeviceHold.runHolding(
+                hold,
+                dev,
+                () ->
+                {
+                    assertEquals(fdsBefore + 1, openFds());
+                    throw new IOException("wipe failed");
+                }
+            );
+            fail("the action's exception must reach the caller");
+        }
+        catch (IOException exc)
+        {
+            assertEquals("wipe failed", exc.getMessage());
+        }
+        assertTrue(hold.getChannels().isEmpty());
+        assertEquals(fdsBefore, openFds());
+    }
+
+    @Test
+    public void invalidPathIsSkippedAndTheActionStillRuns()
+    {
+        List<String> ran = new ArrayList<>();
+        try (BackingDeviceHold hold = BackingDeviceHold.createEnabled(errorReporter))
+        {
+            BackingDeviceHold.runHolding(hold, "/dev/zd\u0000bad", () -> ran.add("ran"));
+            assertTrue(hold.getChannels().isEmpty());
+        }
+        assertEquals(Collections.singletonList("ran"), ran);
+    }
+
+    @Test
+    public void whileHoldingWithNullPathStillRunsTheAction()
+    {
+        List<String> ran = new ArrayList<>();
+        BackingDeviceHold.whileHolding(errorReporter, null, () -> ran.add("ran"));
+        assertEquals(Collections.singletonList("ran"), ran);
+    }
 }
