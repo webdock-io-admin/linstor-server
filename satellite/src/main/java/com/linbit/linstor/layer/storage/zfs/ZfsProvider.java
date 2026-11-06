@@ -1153,11 +1153,16 @@ public class ZfsProvider
     @Override
     public void closeForClone(VlmProviderObject<?> vlm, @Nullable String cloneName) throws StorageException
     {
-        ZfsData<Resource> srcData = (ZfsData<Resource>) vlm;
-        // This hide doesn't make problems for other concurernt clones of the same base resource
-        // It was tested and worked without any problems.
-        ZfsCommands.hideUnhideSnapshotDevice(
-            extCmdFactory.create(), getZPool(srcData.getStorPool()), srcData.getIdentifier(), true);
+        // openForClone sets the clone device path (and makes the snapshot devices visible). A "zfs clone" never
+        // opens the devices, so there is nothing to hide; each "zfs set" would cost a ZFS sync task for nothing
+        if (vlm.getCloneDevicePath() != null)
+        {
+            ZfsData<Resource> srcData = (ZfsData<Resource>) vlm;
+            // This hide doesn't make problems for other concurernt clones of the same base resource
+            // It was tested and worked without any problems.
+            ZfsCommands.hideUnhideSnapshotDevice(
+                extCmdFactory.create(), getZPool(srcData.getStorPool()), srcData.getIdentifier(), true);
+        }
         vlm.setCloneDevicePath(null);
     }
 
