@@ -33,6 +33,7 @@ import com.linbit.linstor.layer.storage.zfs.utils.ZfsUtils.ZfsInfo;
 import com.linbit.linstor.propscon.InvalidKeyException;
 import com.linbit.linstor.storage.StorageConstants;
 import com.linbit.linstor.storage.StorageException;
+import com.linbit.linstor.storage.data.RscLayerSuffixes;
 import com.linbit.linstor.storage.data.provider.AbsStorageVlmData;
 import com.linbit.linstor.storage.data.provider.StorageRscData;
 import com.linbit.linstor.storage.data.provider.zfs.ZfsData;
@@ -97,6 +98,13 @@ public class ZfsProvider
 
     private static final Map<String, BiConsumer<ZfsInfo, String>> DFLT_ZFS_LIST_WITH_PROPS_SETTER;
 
+    /**
+     * If "true", the info list of a device manager run names the volumes, snapshots and pending clone snapshots it
+     * needs instead of listing every snapshot of each volume ("zfs list -r"), whose cost grows with the snapshot count
+     * of e.g. a clone source, and which runs while that source's IO is suspended for a clone.
+     */
+    static final String TARGETED_LIST_ENV = "LINSTOR_SATELLITE_ZFS_TARGETED_LIST";
+
     static
     {
         DFLT_ZFS_LIST_WITH_PROPS_SETTER = new HashMap<>();
@@ -150,12 +158,42 @@ public class ZfsProvider
         throws StorageException
     {
         Set<String> dataSets = getDataSets(vlmDataListRef, snapVlmsRef);
+        boolean targeted = isTargetedListEnabled();
+        if (targeted)
+        {
+            // the clone base snapshots this run may create or reuse (createSnapshotForCloneImpl checks the cache)
+            for (ZfsData<Resource> data : vlmDataListRef)
+            {
+                if (RscLayerSuffixes.shouldSuffixBeCloned(data.getRscLayerObject().getResourceNameSuffix()))
+                {
+                    for (var entry : getCloneForKeyProps(data.getRscLayerObject().getAbsResource()))
+                    {
+                        // getZPool(storPool): data.getZPool() is only set by updateStates, after this listing
+                        dataSets.add(
+                            getZPool(data.getStorPool()) + "/" +
+                                getCloneSnapshotNameFull(data, entry.getValue(), "@")
+                        );
+                    }
+                }
+            }
+            // snapshotExists(.., forTakeSnapshot=true) looks up the snapshot without the rename suffix
+            for (ZfsData<Snapshot> data : snapVlmsRef)
+            {
+                dataSets.add(getZPool(data.getStorPool()) + "/" + asSnapLvIdentifier(data, true));
+            }
+        }
         return ZfsUtils.getZfsList(
             extCmdFactory,
             dataSets,
             kind,
-            DFLT_ZFS_LIST_WITH_PROPS_SETTER
+            DFLT_ZFS_LIST_WITH_PROPS_SETTER,
+            !targeted
         );
+    }
+
+    static boolean isTargetedListEnabled()
+    {
+        return "true".equalsIgnoreCase(System.getenv(TARGETED_LIST_ENV));
     }
 
     private Set<String> getDataSets(List<ZfsData<Resource>> vlmDataListRef, List<ZfsData<Snapshot>> snapVlmsRef)
@@ -408,6 +446,15 @@ public class ZfsProvider
         throws StorageException, InvalidKeyException, DatabaseException
     {
         ZfsInfo zfsInfo = infoListCache.get(vlmDataRef.getFullQualifiedLvIdentifier());
+        if (zfsInfo != null && zfsInfo.type == ZfsVolumeType.VOLUME && !zfsInfo.snapshotsComplete)
+        {
+            // canDelete needs all snapshots of the volume, which a targeted listing does not have
+            @Nullable ZfsInfo completeInfo = loadZfsInfoRecursive(vlmDataRef.getFullQualifiedLvIdentifier());
+            if (completeInfo != null)
+            {
+                zfsInfo = completeInfo;
+            }
+        }
         if (canDelete(zfsInfo))
         {
             deleteCascading(vlmDataRef.getFullQualifiedLvIdentifier(), zfsTypeRef, true);
@@ -536,7 +583,21 @@ public class ZfsProvider
                 originZfsInfo.clones.remove(zfsInfoRef.poolName + File.separator + zfsInfoRef.identifier);
             }
 
-            if (originZfsInfo.markedForDeletion && canDelete(originZfsInfo))
+            if (originZfsInfo.markedForDeletion &&
+                originOrBaseType == ZfsVolumeType.VOLUME &&
+                !originZfsInfo.snapshotsComplete)
+            {
+                // canDelete needs all snapshots of the volume, which a targeted listing does not have
+                originZfsInfo = loadZfsInfoRecursive(originOrBaseVolume);
+                if (originZfsInfo == null)
+                {
+                    errorReporter.logWarning(
+                        "Base volume '%s' vanished while cascading a deletion. Manual cleanup might be necessary",
+                        originOrBaseVolume
+                    );
+                }
+            }
+            if (originZfsInfo != null && originZfsInfo.markedForDeletion && canDelete(originZfsInfo))
             {
                 deleteCascading(originOrBaseVolume, originOrBaseType, false);
             }
@@ -559,6 +620,23 @@ public class ZfsProvider
             {
                 infoListCache.put(fullQualifiedIdentifierRef, ret);
             }
+        }
+        return ret;
+    }
+
+    private @Nullable ZfsInfo loadZfsInfoRecursive(String fullQualifiedIdentifierRef) throws StorageException
+    {
+        HashMap<String, ZfsInfo> zfsList = ZfsUtils.getZfsList(
+            extCmdFactory,
+            Collections.singleton(fullQualifiedIdentifierRef),
+            kind,
+            DFLT_ZFS_LIST_WITH_PROPS_SETTER,
+            true
+        );
+        @Nullable ZfsInfo ret = zfsList.get(fullQualifiedIdentifierRef);
+        if (ret != null)
+        {
+            infoListCache.put(fullQualifiedIdentifierRef, ret);
         }
         return ret;
     }
