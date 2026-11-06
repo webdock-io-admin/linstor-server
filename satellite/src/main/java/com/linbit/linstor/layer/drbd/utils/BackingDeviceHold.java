@@ -12,6 +12,7 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -63,6 +64,41 @@ public final class BackingDeviceHold implements AutoCloseable
     }
 
     /**
+     * Runs the given action while the given device is held open (if the hold is enabled), and releases it
+     * afterwards, also if the action throws.
+     */
+    public static <EXC extends Exception> void whileHolding(
+        ErrorReporter errorReporterRef,
+        @Nullable String devicePath,
+        Action<EXC> action
+    )
+        throws EXC
+    {
+        try (BackingDeviceHold hold = create(errorReporterRef))
+        {
+            runHolding(hold, devicePath, action);
+        }
+    }
+
+    // package-private for tests: the given hold is used instead of one honoring the enable switch
+    static <EXC extends Exception> void runHolding(
+        BackingDeviceHold hold,
+        @Nullable String devicePath,
+        Action<EXC> action
+    )
+        throws EXC
+    {
+        hold.add(Collections.singletonList(devicePath));
+        action.run();
+    }
+
+    @FunctionalInterface
+    public interface Action<EXC extends Exception>
+    {
+        void run() throws EXC;
+    }
+
+    /**
      * Opens the given device paths and keeps them open until {@link #close()}; null entries, missing devices and
      * devices that cannot be opened are skipped.
      */
@@ -74,17 +110,17 @@ public final class BackingDeviceHold implements AutoCloseable
             {
                 if (devicePath != null)
                 {
-                    Path path = Paths.get(devicePath);
-                    if (Files.exists(path))
+                    try
                     {
-                        try
+                        Path path = Paths.get(devicePath);
+                        if (Files.exists(path))
                         {
                             channels.add(FileChannel.open(path, StandardOpenOption.READ));
                         }
-                        catch (IOException | RuntimeException exc)
-                        {
-                            errorReporter.logInfo("Not holding %s open: %s", devicePath, exc.getMessage());
-                        }
+                    }
+                    catch (IOException | RuntimeException exc)
+                    {
+                        errorReporter.logInfo("Not holding %s open: %s", devicePath, exc.getMessage());
                     }
                 }
             }
