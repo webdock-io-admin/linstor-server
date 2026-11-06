@@ -481,6 +481,15 @@ public class ZfsCommands
         );
     }
 
+    /**
+     * Returns the "-o linstor:&lt;name&gt;=&lt;value&gt;" arguments that set a LINSTOR user property in the same
+     * command (and the same ZFS sync task) that creates a dataset or snapshot.
+     */
+    public static String[] userPropOption(String name, String value)
+    {
+        return new String[] {"-o", ZFS_USER_PROP_LINSTOR_PREFIX + name + "=" + value};
+    }
+
     public static OutputData setUserProperty(ExtCmd extCmd, String zPool, String zfsId, String name, String value)
         throws StorageException
     {

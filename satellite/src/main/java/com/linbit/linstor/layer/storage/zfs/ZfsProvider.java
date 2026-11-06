@@ -50,6 +50,8 @@ import javax.inject.Inject;
 import javax.inject.Singleton;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -987,22 +989,19 @@ public class ZfsProvider
 
         if (!infoListCache.containsKey(vlmData.getZPool() + "/" + srcFullSnapshotName))
         {
+            // mark the snapshot as temporary clone base and as to be deleted in the same command that creates it: one
+            // ZFS sync task instead of three, and no unmarked snapshot is left behind if a later step fails
+            List<String> markOptions = new ArrayList<>();
+            markOptions.addAll(Arrays.asList(ZfsCommands.userPropOption("clone_for", cloneRscName)));
+            markOptions.addAll(
+                Arrays.asList(ZfsCommands.userPropOption(ZFS_PROP_KEY_MARKED_FOR_DELETION, ZSF_PROP_VAL_TRUE))
+            );
             ZfsCommands.createSnapshotFullName(
                 extCmdFactory.create(),
                 vlmData.getZPool(),
-                srcFullSnapshotName
-            );
-            // mark snapshot as temporary clone
-            ZfsCommands.setUserProperty(
-                extCmdFactory.create(),
-                vlmData.getZPool(),
                 srcFullSnapshotName,
-                "clone_for",
-                cloneRscName
+                markOptions.toArray(new String[0])
             );
-
-            // mark to be deleted
-            markForDeletion(vlmData.getZPool(), srcFullSnapshotName);
         }
         else
         {
