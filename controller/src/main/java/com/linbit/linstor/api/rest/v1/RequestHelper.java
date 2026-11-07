@@ -7,6 +7,7 @@ import com.linbit.linstor.api.ApiConsts;
 import com.linbit.linstor.api.ApiModule;
 import com.linbit.linstor.api.LinStorScope;
 import com.linbit.linstor.api.rest.v1.utils.ApiCallRcRestUtils;
+import com.linbit.linstor.core.ControllerCoreModule;
 import com.linbit.linstor.core.apicallhandler.response.ApiRcException;
 import com.linbit.linstor.core.apicallhandler.response.CtrlResponseUtils;
 import com.linbit.linstor.core.cfg.CtrlConfig;
@@ -22,6 +23,7 @@ import com.linbit.linstor.transaction.manager.TransactionMgrGenerator;
 import com.linbit.linstor.transaction.manager.TransactionMgrUtil;
 
 import javax.inject.Inject;
+import javax.inject.Named;
 import javax.ws.rs.container.AsyncResponse;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
@@ -30,6 +32,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.Callable;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Supplier;
 
 import com.fasterxml.jackson.core.JsonParseException;
@@ -41,6 +44,7 @@ import org.glassfish.grizzly.http.server.Request;
 import org.slf4j.MDC;
 import org.slf4j.event.Level;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
 import reactor.util.context.Context;
 import reactor.util.function.Tuple2;
 import reactor.util.function.Tuples;
@@ -52,6 +56,10 @@ public class RequestHelper
     private final TransactionMgrGenerator transactionMgrGenerator;
     private final LdapAuthentication ldapAuthentication;
     private final CtrlConfig linstorConfig;
+    private final Scheduler restResponseScheduler;
+
+    /** fix-24 (D): seconds a client is asked to wait when the RestResponse queue is full (503). */
+    static final String RETRY_AFTER_SEC = "5";
 
     @Inject
     public RequestHelper(
@@ -59,9 +67,11 @@ public class RequestHelper
         LinStorScope apiCallScopeRef,
         TransactionMgrGenerator transactionMgrGeneratorRef,
         LdapAuthentication ldapAuthenticationRef,
-        CtrlConfig linstorConfigRef
+        CtrlConfig linstorConfigRef,
+        @Named(ControllerCoreModule.REST_RESPONSE_SCHEDULER) Scheduler restResponseSchedulerRef
     )
     {
+        restResponseScheduler = restResponseSchedulerRef;
         errorReporter = errorReporterRef;
         apiCallScope = apiCallScopeRef;
         transactionMgrGenerator = transactionMgrGeneratorRef;
@@ -301,20 +311,75 @@ public class RequestHelper
                     }
                     return Mono.just(ApiCallRcRestUtils.toResponse(apiCallRc, Response.Status.INTERNAL_SERVER_ERROR));
                 })
+            // fix-24 (D): never write the HTTP response on the thread that completed the satellite call (the in-order
+            // satellite message worker): a slow or gone client would hold that satellite's turn, and with it the whole
+            // MainWorkerPool, until Grizzly's write timeout.
+            .publishOn(restResponseScheduler)
             .subscribe(
                 asyncResponse::resume,
-                exc ->
-                {
-                    String errId = errorReporter.reportError(exc);
-                    ApiCallRcImpl apiCallRc = new ApiCallRcImpl();
-                    apiCallRc.addEntry(
-                        ApiCallRcImpl.simpleEntry(ApiConsts.FAIL_UNKNOWN_ERROR, exc.getMessage())
-                            .addErrorId(errId));
-                    asyncResponse.resume(
-                        ApiCallRcRestUtils.toResponse(apiCallRc, Response.Status.INTERNAL_SERVER_ERROR)
-                    );
-                }
+                exc -> resumeWithError(asyncResponse, exc)
             );
+    }
+
+    /**
+     * fix-24 (D): the RestResponse scheduler for REST endpoints that subscribe to their response themselves.
+     */
+    Scheduler getRestResponseScheduler()
+    {
+        return restResponseScheduler;
+    }
+
+    /**
+     * Error path of a REST response. A rejected publishOn (RestResponse queue full) becomes 503 + Retry-After without
+     * an error report; everything else is reported and answered with 500, as before.
+     * Runs on the calling thread; both answers are small and do not block on a slow client.
+     */
+    void resumeWithError(AsyncResponse asyncResponse, Throwable exc)
+    {
+        ApiCallRcImpl apiCallRc = new ApiCallRcImpl();
+        if (isRejected(exc))
+        {
+            errorReporter.logWarning("REST response queue full, answering 503: %s", exc.getMessage());
+            apiCallRc.addEntry(
+                ApiCallRcImpl.simpleEntry(
+                    ApiConsts.FAIL_UNKNOWN_ERROR,
+                    "Controller busy writing REST responses, retry in " + RETRY_AFTER_SEC + " s"
+                )
+            );
+            asyncResponse.resume(
+                Response.fromResponse(
+                    ApiCallRcRestUtils.toResponse(apiCallRc, Response.Status.SERVICE_UNAVAILABLE)
+                )
+                    .header("Retry-After", RETRY_AFTER_SEC)
+                    .build()
+            );
+        }
+        else
+        {
+            String errId = errorReporter.reportError(exc);
+            apiCallRc.addEntry(
+                ApiCallRcImpl.simpleEntry(ApiConsts.FAIL_UNKNOWN_ERROR, exc.getMessage())
+                    .addErrorId(errId));
+            asyncResponse.resume(
+                ApiCallRcRestUtils.toResponse(apiCallRc, Response.Status.INTERNAL_SERVER_ERROR)
+            );
+        }
+    }
+
+    static boolean isRejected(@Nullable Throwable exc)
+    {
+        Throwable cur = exc;
+        int depth = 0;
+        while (cur != null && depth < 8)
+        {
+            if (cur instanceof RejectedExecutionException)
+            {
+                return true;
+            }
+            cur = cur.getCause();
+            depth++;
+        }
+        return false;
     }
 
     static void safeAsyncResponse(AsyncResponse asyncResponse, Runnable restAction)
