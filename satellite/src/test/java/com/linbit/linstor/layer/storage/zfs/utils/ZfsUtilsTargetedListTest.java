@@ -146,6 +146,26 @@ public class ZfsUtilsTargetedListTest
         assertThat(commands).isNotEmpty().allSatisfy(cmd -> assertThat(cmd).contains("-r"));
     }
 
+    /**
+     * The allocated-size query (behind /v1/view/resources) lists only the named volumes: one "zfs list" without
+     * "-r", no origin lookup and no "zfs get", however many snapshots the volumes have.
+     */
+    @Test
+    public void listDatasetsListsOnlyTheNamedVolumes() throws Exception
+    {
+        HashMap<String, ZfsInfo> infos = ZfsUtils.listDatasets(
+            extCmdFactory,
+            Arrays.asList(SRC, CLONE),
+            DeviceProviderKind.ZFS_THIN
+        );
+
+        assertThat(commands).hasSize(1);
+        assertThat(commands.get(0)).contains("list").doesNotContain("-r").contains(SRC, CLONE);
+        assertThat(infos).containsOnlyKeys(SRC, CLONE);
+        assertThat(infos.get(SRC).snapshots).isEmpty();
+        assertThat(infos.get(CLONE).allocatedSize).isEqualTo(1L);
+    }
+
     @Test
     public void vanishedOriginIsSkipped() throws Exception
     {
