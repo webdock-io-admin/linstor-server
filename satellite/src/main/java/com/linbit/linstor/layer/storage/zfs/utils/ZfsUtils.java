@@ -267,6 +267,20 @@ public class ZfsUtils
         return infoByIdentifier;
     }
 
+    /**
+     * Lists exactly the given datasets: no snapshots of the given volumes, no origins and no user properties. Use it
+     * for queries that only need size information of known datasets.
+     */
+    public static HashMap<String, ZfsInfo> listDatasets(
+        final ExtCmdFactory extCmdFactoryRef,
+        Collection<String> datasets,
+        DeviceProviderKind kindRef
+    )
+        throws StorageException
+    {
+        return buildZfsInfoMap(extCmdFactoryRef.create(), datasets, kindRef, false);
+    }
+
     private static HashMap<String, ZfsInfo> buildZfsInfoMap(
         final ExtCmd extCmd,
         Collection<String> datasets,

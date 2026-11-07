@@ -1101,12 +1101,10 @@ public class ZfsProvider
             dataSets.add(String.format("%s/%s", zpool, roVlmProvInfo.getIdentifier()));
         }
 
-        HashMap<String, ZfsInfo> zfsListMap = ZfsUtils.getZfsList(
-            extCmdFactory,
-            dataSets,
-            kind,
-            Collections.emptyMap()
-        );
+        // only the allocated size of these volumes is needed: a recursive list would also walk every snapshot of them,
+        // which on volumes with long snapshot histories made each allocated-size query (and so every
+        // /v1/view/resources call) take minutes
+        HashMap<String, ZfsInfo> zfsListMap = ZfsUtils.listDatasets(extCmdFactory, dataSets, kind);
 
         for (ReadOnlyVlmProviderInfo roVlmProvInfo : vlmDataListRef)
         {
