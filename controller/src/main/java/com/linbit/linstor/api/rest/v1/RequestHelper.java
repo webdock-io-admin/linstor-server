@@ -43,6 +43,7 @@ import io.prometheus.client.Histogram;
 import org.glassfish.grizzly.http.server.Request;
 import org.slf4j.MDC;
 import org.slf4j.event.Level;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 import reactor.util.context.Context;
@@ -327,6 +328,16 @@ public class RequestHelper
     Scheduler getRestResponseScheduler()
     {
         return restResponseScheduler;
+    }
+
+    /**
+     * fix-24 (E0): hop a satellite-fed flux onto the RestResponse scheduler before the endpoint maps it into a large
+     * JSON body. Without this, the render (e.g. objectMapper.writeValueAsString of the 14-MB resource view) runs on the
+     * in-order satellite message worker that completed the last fetch, upstream of doFlux's publishOn.
+     */
+    <T> Flux<T> offWorker(Flux<T> flux)
+    {
+        return flux.publishOn(restResponseScheduler);
     }
 
     /**
