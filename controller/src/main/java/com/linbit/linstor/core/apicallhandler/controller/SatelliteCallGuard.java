@@ -73,7 +73,7 @@ public class SatelliteCallGuard
                             what,
                             nodeName,
                             exc instanceof TimeoutException ?
-                                "timeout after " + timeout.getSeconds() + " s" :
+                                "timeout after " + timeout.toSeconds() + " s" :
                                 exc.getClass().getSimpleName()
                         );
                     }
