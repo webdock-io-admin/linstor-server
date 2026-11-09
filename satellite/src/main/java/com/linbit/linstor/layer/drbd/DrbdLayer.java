@@ -52,6 +52,7 @@ import com.linbit.linstor.layer.drbd.helper.ReadyForPrimaryNotifier;
 import com.linbit.linstor.layer.drbd.resfiles.ConfFileBuilder;
 import com.linbit.linstor.layer.drbd.resfiles.DrbdResourceFileUtils;
 import com.linbit.linstor.layer.drbd.utils.BackingDeviceHold;
+import com.linbit.linstor.layer.drbd.utils.OldInternalMdResync;
 import com.linbit.linstor.layer.drbd.utils.DrbdAdm;
 import com.linbit.linstor.layer.drbd.utils.DrbdGiStringBuilder;
 import com.linbit.linstor.layer.drbd.utils.DrbdMdV09PeerBitmapUuids;
@@ -73,6 +74,7 @@ import com.linbit.linstor.storage.interfaces.layers.drbd.DrbdRscObject.DrbdRscFl
 import com.linbit.linstor.storage.kinds.DeviceLayerKind;
 import com.linbit.linstor.storage.kinds.ExtToolsInfo;
 import com.linbit.linstor.storage.utils.MkfsUtils;
+import com.linbit.linstor.storage.utils.Commands;
 import com.linbit.linstor.storage.utils.VolumeUtils;
 import com.linbit.linstor.utils.layer.DrbdLayerUtils;
 import com.linbit.linstor.utils.layer.LayerRscUtils;
@@ -749,19 +751,46 @@ public class DrbdLayer implements DeviceLayer
                 {
                     if (needsResize(drbdVlmData) && drbdVlmData.getSizeState().equals(Size.TOO_SMALL))
                     {
-                        drbdUtils.resize(
-                            drbdVlmData,
-                            // TODO: not sure if we should "--assume-clean" if data device is only partially
-                            // thinly backed
-                            VolumeUtils.isVolumeThinlyBacked(drbdVlmData, false),
-                            null
-                        );
+                        // TODO: not sure if we should "--assume-clean" if data device is only partially
+                        // thinly backed
+                        boolean assumeClean = VolumeUtils.isVolumeThinlyBacked(drbdVlmData, false);
+                        // fix 25: with "--assume-clean" and internal meta-data, the old meta-data range stays in the
+                        // data area, different on each node (LINBIT/drbd#165); remember where it starts
+                        @Nullable Long oldNetKiB = assumeClean ? sizeBeforeGrowForOldMdResync(drbdVlmData) : null;
+                        drbdUtils.resize(drbdVlmData, assumeClean, null);
                         errorReporter.logInfo(
                             "DRBD resized %s/%d",
                             drbdRscData.getSuffixedResourceName(),
                             drbdVlmData.getVlmNr().getValue()
                         );
                         drbdRscData.setAdjustRequired(true);
+                        @Nullable String devicePath = drbdVlmData.getDevicePath();
+                        if (oldNetKiB != null && devicePath != null)
+                        {
+                            try
+                            {
+                                long newNetKiB = Commands.getBlockSizeInKib(extCmdFactory.create(), devicePath);
+                                OldInternalMdResync.run(
+                                    extCmdFactory,
+                                    errorReporter,
+                                    drbdRscData.getSuffixedResourceName(),
+                                    drbdVlmData.getVlmNr().value,
+                                    oldNetKiB,
+                                    newNetKiB,
+                                    drbdRscData.getPeerSlots(),
+                                    oldMdResyncPeers(drbdRscData)
+                                );
+                            }
+                            catch (StorageException exc)
+                            {
+                                errorReporter.logWarning(
+                                    "Cannot read the size of %s after the grow, not verifying the old meta-data " +
+                                        "range: %s",
+                                    devicePath,
+                                    exc.getMessage()
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -1658,6 +1687,54 @@ public class DrbdLayer implements DeviceLayer
     }
 
     // package-private for tests
+    /**
+     * fix 25: the DRBD device size before an "--assume-clean" grow, if the old internal meta-data range should be
+     * verified afterwards ({@link OldInternalMdResync}); null otherwise or on any error.
+     */
+    private @Nullable Long sizeBeforeGrowForOldMdResync(DrbdVlmData<Resource> drbdVlmData)
+    {
+        @Nullable Long ret = null;
+        @Nullable String metaDiskPath = drbdVlmData.getMetaDiskPath();
+        @Nullable String devicePath = drbdVlmData.getDevicePath();
+        if (OldInternalMdResync.isEnabled() && drbdVlmData.hasDisk() && devicePath != null &&
+            (metaDiskPath == null || metaDiskPath.trim().isEmpty() || "internal".equals(metaDiskPath)))
+        {
+            try
+            {
+                ret = Commands.getBlockSizeInKib(extCmdFactory.create(), devicePath);
+            }
+            catch (StorageException exc)
+            {
+                errorReporter.logWarning(
+                    "Cannot read the size of %s before the grow, not verifying the old meta-data range: %s",
+                    devicePath,
+                    exc.getMessage()
+                );
+            }
+        }
+        return ret;
+    }
+
+    /**
+     * fix 25: the diskful peers with a higher node-id than ours, so that exactly one side of each pair verifies.
+     */
+    static List<Integer> oldMdResyncPeers(DrbdRscData<Resource> drbdRscData)
+    {
+        List<Integer> peers = new ArrayList<>();
+        int localNodeId = drbdRscData.getNodeId().value;
+        for (DrbdRscData<Resource> other : drbdRscData.getRscDfnLayerObject().getDrbdRscDataList())
+        {
+            Resource otherRsc = other.getAbsResource();
+            if (!other.equals(drbdRscData) && !otherRsc.isDrbdDiskless() &&
+                otherRsc.getStateFlags().isUnset(Resource.Flags.DELETE, Resource.Flags.DRBD_DELETE) &&
+                other.getNodeId().value > localNodeId)
+            {
+                peers.add(other.getNodeId().value);
+            }
+        }
+        return peers;
+    }
+
     static List<@Nullable String> backingDevices(DrbdRscData<Resource> drbdRscData)
     {
         // not filtered on hasDisk(): that is the kernel's attach state, still false for a new or cloned volume while
