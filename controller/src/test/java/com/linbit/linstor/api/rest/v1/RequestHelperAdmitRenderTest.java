@@ -100,4 +100,69 @@ public class RequestHelperAdmitRenderTest
         verify(req).setAttribute(eq(ResponseBudget.RENDER_TICKET_ATTR), org.mockito.ArgumentMatchers.notNull());
         assertNotNull(budget);
     }
+
+    /** Counts subscriptions = satellite fan-outs + object walks that actually start; never completes. */
+    private static Flux<String> walk(java.util.concurrent.atomic.AtomicInteger walks)
+    {
+        return Flux.defer(() ->
+        {
+            walks.incrementAndGet();
+            return Flux.<String>never();
+        });
+    }
+
+    @Test
+    public void parallelRequestsForAKnownLargeTargetStartOnlyFourWalks()
+    {
+        // E3b: 8 parallel from one address for a target known to be ~14 MB -> 4 walks, 4 refused without a walk
+        budget.recordAnswerSize(client, "/v1/view/resources", 14 * MIB);
+        java.util.concurrent.atomic.AtomicInteger walks = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger refused = new java.util.concurrent.atomic.AtomicInteger();
+        List<Disposable> inFlight = new ArrayList<>();
+        try
+        {
+            for (int idx = 0; idx < 8; idx++)
+            {
+                inFlight.add(
+                    helper.offWorker(walk(walks), request()).subscribe(
+                        ignored -> { },
+                        exc ->
+                        {
+                            if (exc instanceof RequestHelper.RenderRefusedException)
+                            {
+                                refused.incrementAndGet();
+                            }
+                        }
+                    )
+                );
+            }
+            assertEquals(4, walks.get());
+            assertEquals(4, refused.get());
+        }
+        finally
+        {
+            inFlight.forEach(Disposable::dispose);
+        }
+        assertEquals(0, budget.getGlobalUsedBytes()); // the reservations are back
+    }
+
+    @Test
+    public void firstBurstForANeverSeenTargetIsCappedByTheRendersCap()
+    {
+        // documented limit: without a recorded size, up to the renders cap (8) walks start per address
+        java.util.concurrent.atomic.AtomicInteger walks = new java.util.concurrent.atomic.AtomicInteger();
+        List<Disposable> inFlight = new ArrayList<>();
+        try
+        {
+            for (int idx = 0; idx < 10; idx++)
+            {
+                inFlight.add(helper.offWorker(walk(walks), request()).subscribe(ignored -> { }, ignored -> { }));
+            }
+            assertEquals(budget.getPerClientCapRenders(), walks.get());
+        }
+        finally
+        {
+            inFlight.forEach(Disposable::dispose);
+        }
+    }
 }

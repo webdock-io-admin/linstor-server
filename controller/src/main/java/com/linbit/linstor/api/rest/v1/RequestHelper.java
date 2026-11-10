@@ -377,37 +377,49 @@ public class RequestHelper
     {
         return Flux.defer(() ->
         {
-            // fix-24b (E3): the render ticket lives in this closure; doFinally returns it once the render downstream
-            // is done (the render runs synchronously in onNext), on error and on cancel
+            // fix-24b (E3b): admission at the entry of the list endpoint, before subscribing to the satellite-fed
+            // flux. That flux is lazy (ScopeRunner defers), so a refused request does no satellite fan-out and no walk
+            // of the objects under the read locks. The ticket lives in this closure until the flux terminates (after the
+            // render, which runs synchronously downstream in onNext), on error and on cancel.
             AtomicReference<ResponseBudget.@Nullable RenderTicket> ticketRef = new AtomicReference<>();
-            return offWorker(flux)
-                .<T>handle(
-                    (item, sink) ->
-                    {
-                        if (!isClientConnected(request))
+            Flux<T> ret;
+            if (!isClientConnected(request))
+            {
+                ret = Flux.error(new ClientGoneException());
+            }
+            else if (!admitRender(request, ticketRef))
+            {
+                ret = Flux.error(new RenderRefusedException());
+            }
+            else
+            {
+                ret = offWorker(flux)
+                    .<T>handle(
+                        (item, sink) ->
                         {
-                            sink.error(new ClientGoneException());
+                            // E1: the client may have gone during the fan-out and the walk
+                            if (isClientConnected(request))
+                            {
+                                sink.next(item);
+                            }
+                            else
+                            {
+                                sink.error(new ClientGoneException());
+                            }
                         }
-                        else if (ticketRef.get() == null && !admitRender(request, ticketRef))
+                    )
+                    .doFinally(
+                        ignored ->
                         {
-                            sink.error(new RenderRefusedException());
+                            ResponseBudget.@Nullable RenderTicket ticket = ticketRef.getAndSet(null);
+                            if (ticket != null)
+                            {
+                                ticket.close();
+                            }
                         }
-                        else
-                        {
-                            sink.next(item);
-                        }
-                    }
-                )
-                .doFinally(
-                    ignored ->
-                    {
-                        ResponseBudget.@Nullable RenderTicket ticket = ticketRef.getAndSet(null);
-                        if (ticket != null)
-                        {
-                            ticket.close();
-                        }
-                    }
-                );
+                    );
+            }
+            return ret;
         });
     }
 
