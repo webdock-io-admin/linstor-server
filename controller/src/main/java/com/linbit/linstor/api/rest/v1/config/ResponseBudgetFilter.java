@@ -22,6 +22,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.glassfish.grizzly.Connection;
 import org.glassfish.grizzly.http.server.HttpServer;
 import org.glassfish.grizzly.http.server.NetworkListener;
 import org.glassfish.grizzly.http.server.Request;
@@ -37,7 +38,10 @@ import org.glassfish.grizzly.http.server.Request;
  * read ends up entirely in the async write queue. Per chunk, the flush blocks once the queue is full, and the
  * transport write timeout (fix-24 D2) ends the write of a stalled client after one chunk instead of after the body.
  *
- * The lease is returned when the write ends, also on IOException (client gone, write timeout). If the write never
+ * The lease is returned when the write ends, also on IOException (client gone, write timeout).
+ *
+ * E2d: if the write fails, the connection is terminated, not closed: Grizzly's graceful close waits until the queued
+ * bytes are sent, which for a client that does not read means until the client itself closes. If the write never
  * runs (e.g. a later filter fails), ResponseBudget's 10-minute safety net returns it on a later acquire.
  *
  * Costs and limits:
@@ -105,7 +109,8 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
 
         if (body != null && body.length > LARGE_ENTITY_BYTES)
         {
-            String client = clientKey();
+            @Nullable Request grizzlyRequest = grizzlyRequest();
+            String client = clientKey(grizzlyRequest);
             ResponseBudget.@Nullable Lease lease = budget.tryAcquire(client, body.length);
             if (lease == null)
             {
@@ -115,7 +120,7 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
             {
                 // no explicit Content-Length: Grizzly may gzip the body (compression is on for JSON) and frames it
                 MediaType mediaType = responseCtx.getMediaType();
-                responseCtx.setEntity(new ChunkedBody(body, lease), null, mediaType);
+                responseCtx.setEntity(new ChunkedBody(body, lease, connectionOf(grizzlyRequest)), null, mediaType);
             }
         }
     }
@@ -155,23 +160,53 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
         responseCtx.setEntity(answer.getEntity(), null, MediaType.APPLICATION_JSON_TYPE);
     }
 
-    private String clientKey()
+    private @Nullable Request grizzlyRequest()
     {
-        String key = UNKNOWN_CLIENT;
+        @Nullable Request req = null;
         try
         {
             if (grizzlyRequestProvider != null)
             {
-                Request req = grizzlyRequestProvider.get();
-                if (req != null && req.getRemoteAddr() != null)
-                {
-                    key = req.getRemoteAddr();
-                }
+                req = grizzlyRequestProvider.get();
             }
         }
         catch (RuntimeException ignored)
         {
-            // no request in scope: all such answers share one client budget
+            // no request in scope
+        }
+        return req;
+    }
+
+    private static @Nullable Connection<?> connectionOf(@Nullable Request req)
+    {
+        @Nullable Connection<?> conn = null;
+        try
+        {
+            if (req != null && req.getContext() != null)
+            {
+                conn = req.getContext().getConnection();
+            }
+        }
+        catch (RuntimeException ignored)
+        {
+            // cannot terminate on a failed write; the lease is still returned
+        }
+        return conn;
+    }
+
+    private String clientKey(@Nullable Request req)
+    {
+        String key = UNKNOWN_CLIENT;
+        try
+        {
+            if (req != null && req.getRemoteAddr() != null)
+            {
+                key = req.getRemoteAddr();
+            }
+        }
+        catch (RuntimeException ignored)
+        {
+            // no address: all such answers share one client budget
         }
         if (UNKNOWN_CLIENT.equals(key) && errorReporter != null && warnedUnknownClient.compareAndSet(false, true))
         {
@@ -187,11 +222,13 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
     {
         private final byte[] body;
         private final ResponseBudget.Lease lease;
+        private final @Nullable Connection<?> connection;
 
-        ChunkedBody(byte[] bodyRef, ResponseBudget.Lease leaseRef)
+        ChunkedBody(byte[] bodyRef, ResponseBudget.Lease leaseRef, @Nullable Connection<?> connectionRef)
         {
             body = bodyRef;
             lease = leaseRef;
+            connection = connectionRef;
         }
 
         @Override
@@ -204,6 +241,15 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
                     out.write(body, off, Math.min(CHUNK_BYTES, body.length - off));
                     out.flush();
                 }
+            }
+            catch (IOException exc)
+            {
+                // E2d: drop the connection and its queued bytes now (see class javadoc)
+                if (connection != null)
+                {
+                    connection.terminateWithReason(exc);
+                }
+                throw exc;
             }
             finally
             {

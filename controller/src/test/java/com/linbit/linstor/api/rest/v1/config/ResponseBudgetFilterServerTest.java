@@ -49,13 +49,18 @@ public class ResponseBudgetFilterServerTest
         BODY = new String(chars);
     }
 
+    /** The server side of the last request, to check from the test whether the server closed it. */
+    private static final java.util.concurrent.atomic.AtomicReference<org.glassfish.grizzly.Connection<?>> LAST_CONN =
+        new java.util.concurrent.atomic.AtomicReference<>();
+
     @Path("big")
     public static class BigResource
     {
         @GET
         @Produces(MediaType.APPLICATION_JSON)
-        public String big()
+        public String big(@javax.ws.rs.core.Context org.glassfish.grizzly.http.server.Request request)
         {
+            LAST_CONN.set(request.getContext().getConnection());
             return BODY;
         }
     }
@@ -253,49 +258,24 @@ public class ResponseBudgetFilterServerTest
     }
 
     @Test
-    public void writeTimeoutClosesTheConnection() throws Exception
+    public void writeTimeoutClosesTheConnectionWithoutTheClientReading() throws Exception
     {
         ResponseBudget budget = new ResponseBudget(1000 * MIB, 1000 * MIB, 1000);
         int port = start(budget);
         long start = System.currentTimeMillis();
         assertEquals("HTTP/1.1 200 OK", requestAndStall(port));
-        Socket sock = sockets.get(0);
+        org.glassfish.grizzly.Connection<?> serverSide = LAST_CONN.get();
+        assertTrue(serverSide != null && serverSide.isOpen());
+
         waitFor(() -> budget.getGlobalUsedBytes() == 0, (WRITE_TIMEOUT_SEC + 8) * 1000L);
         long releasedAfterMs = System.currentTimeMillis() - start;
         assertEquals(0, budget.getGlobalUsedBytes());
         // the write ended by the timeout, not by completing into the kernel's buffers
         assertTrue("lease released after " + releasedAfterMs + " ms", releasedAfterMs >= (WRITE_TIMEOUT_SEC - 1) * 1000L);
 
-        // after the write timeout the server must have closed the connection: reading drains what was sent and
-        // then sees EOF (or a reset), well before the client's own read timeout
-        sock.setSoTimeout(5_000);
-        InputStream in = sock.getInputStream();
-        byte[] buf = new byte[64 * 1024];
-        long end = System.currentTimeMillis() + 5_000;
-        boolean closed = false;
-        long received = 0;
-        try
-        {
-            while (System.currentTimeMillis() < end)
-            {
-                int got = in.read(buf);
-                if (got < 0)
-                {
-                    closed = true;
-                    break;
-                }
-                received += got;
-            }
-        }
-        catch (java.net.SocketException reset)
-        {
-            closed = true;
-        }
-        catch (java.net.SocketTimeoutException stillOpen)
-        {
-            closed = false;
-        }
-        assertTrue("server kept the timed-out connection open", closed);
-        assertTrue("whole body arrived (" + received + " bytes): the write did not time out", received < BODY_MIB * MIB);
+        // E2d: the client still reads nothing; the server must drop the connection by itself. A graceful close
+        // would wait for the queued bytes to drain, i.e. for a client that never reads.
+        waitFor(() -> !serverSide.isOpen(), 3_000);
+        assertTrue("server kept the timed-out connection open", !serverSide.isOpen());
     }
 }
