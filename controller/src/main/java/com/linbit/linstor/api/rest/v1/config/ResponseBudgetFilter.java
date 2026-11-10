@@ -41,7 +41,8 @@ import org.glassfish.grizzly.http.server.Request;
  * The lease is returned when the write ends, also on IOException (client gone, write timeout).
  *
  * E2d: if the write fails, the connection is terminated, not closed: Grizzly's graceful close waits until the queued
- * bytes are sent, which for a client that does not read means until the client itself closes. If the write never
+ * bytes are sent, which for a client that does not read means until the client itself closes.
+ * E2e: with SO_LINGER 0, so the kernel drops the unread send buffer with a reset instead of a FIN behind it. If the write never
  * runs (e.g. a later filter fails), ResponseBudget's 10-minute safety net returns it on a later acquire.
  *
  * Costs and limits:
@@ -297,6 +298,7 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
                 // E2d: drop the connection and its queued bytes now (see class javadoc)
                 if (connection != null)
                 {
+                    abortiveClose(connection);
                     connection.terminateWithReason(exc);
                 }
                 throw exc;
@@ -304,6 +306,27 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
             finally
             {
                 lease.close();
+            }
+        }
+
+        /**
+         * E2e: SO_LINGER 0 before the terminate, so the close is a reset. Without it the kernel keeps the unread send
+         * buffer (~200 KB per socket on the rack) in FIN-WAIT-1 until the client closes. The write has already failed
+         * or timed out, so nothing in that buffer would be read.
+         */
+        static void abortiveClose(Connection<?> conn)
+        {
+            try
+            {
+                if (conn instanceof org.glassfish.grizzly.nio.NIOConnection nioConn &&
+                    nioConn.getChannel() instanceof java.nio.channels.SocketChannel channel)
+                {
+                    channel.setOption(java.net.StandardSocketOptions.SO_LINGER, 0);
+                }
+            }
+            catch (IOException | RuntimeException ignored)
+            {
+                // the terminate still closes the connection, gracefully
             }
         }
 

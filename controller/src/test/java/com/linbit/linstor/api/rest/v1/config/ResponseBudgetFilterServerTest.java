@@ -278,4 +278,37 @@ public class ResponseBudgetFilterServerTest
         waitFor(() -> !serverSide.isOpen(), 3_000);
         assertTrue("server kept the timed-out connection open", !serverSide.isOpen());
     }
+
+    @Test
+    public void writeTimeoutResetsTheConnection() throws Exception
+    {
+        // E2e: after the write timeout the client sees a reset, not a FIN after the server's unread send buffer
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 1000 * MIB, 1000);
+        int port = start(budget);
+        assertEquals("HTTP/1.1 200 OK", requestAndStall(port));
+        Socket sock = sockets.get(0);
+        org.glassfish.grizzly.Connection<?> serverSide = LAST_CONN.get();
+        waitFor(() -> budget.getGlobalUsedBytes() == 0, (WRITE_TIMEOUT_SEC + 8) * 1000L);
+        waitFor(() -> !serverSide.isOpen(), 3_000);
+
+        sock.setSoTimeout(5_000);
+        InputStream in = sock.getInputStream();
+        byte[] buf = new byte[64 * 1024];
+        boolean reset = false;
+        long received = 0;
+        try
+        {
+            int got = in.read(buf);
+            while (got >= 0)
+            {
+                received += got;
+                got = in.read(buf);
+            }
+        }
+        catch (java.net.SocketException exc)
+        {
+            reset = true;
+        }
+        assertTrue("expected a connection reset after " + received + " bytes, got EOF", reset);
+    }
 }
