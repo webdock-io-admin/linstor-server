@@ -341,6 +341,56 @@ public class RequestHelper
     }
 
     /**
+     * fix-24b (E1): like {@link #offWorker(Flux)}, and skip the render if the client's connection is already closed
+     * when the data arrives. The answer then ends as {@link ClientGoneException}, which
+     * {@link #resumeWithError(AsyncResponse, Throwable)} drops without rendering or reporting.
+     */
+    <T> Flux<T> offWorker(Flux<T> flux, Request request)
+    {
+        return offWorker(flux).handle(
+            (item, sink) ->
+            {
+                if (isClientConnected(request))
+                {
+                    sink.next(item);
+                }
+                else
+                {
+                    sink.error(new ClientGoneException());
+                }
+            }
+        );
+    }
+
+    static boolean isClientConnected(@Nullable Request request)
+    {
+        boolean connected = true;
+        try
+        {
+            if (request != null && request.getContext() != null && request.getContext().getConnection() != null)
+            {
+                connected = request.getContext().getConnection().isOpen();
+            }
+        }
+        catch (RuntimeException ignored)
+        {
+            // cannot tell: render as before
+        }
+        return connected;
+    }
+
+    /** fix-24b (E1): the client closed its connection before its answer was rendered. */
+    static final class ClientGoneException extends RuntimeException
+    {
+        private static final long serialVersionUID = 1L;
+
+        ClientGoneException()
+        {
+            super("REST client closed the connection before the answer was rendered", null, false, false);
+        }
+    }
+
+    /**
      * Error path of a REST response. A rejected publishOn (RestResponse queue full) becomes 503 + Retry-After without
      * an error report; everything else is reported and answered with 500, as before.
      * Runs on the calling thread; both answers are small and do not block on a slow client.
@@ -348,7 +398,13 @@ public class RequestHelper
     void resumeWithError(AsyncResponse asyncResponse, Throwable exc)
     {
         ApiCallRcImpl apiCallRc = new ApiCallRcImpl();
-        if (isRejected(exc))
+        if (exc instanceof ClientGoneException)
+        {
+            // fix-24b (E1): nobody is left to read an answer; end the request without a body
+            errorReporter.logDebug("REST answer dropped: %s", exc.getMessage());
+            asyncResponse.cancel();
+        }
+        else if (isRejected(exc))
         {
             errorReporter.logWarning("REST response queue full, answering 503: %s", exc.getMessage());
             apiCallRc.addEntry(

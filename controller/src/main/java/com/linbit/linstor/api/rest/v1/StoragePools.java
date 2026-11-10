@@ -172,7 +172,7 @@ public class StoragePools
                     asyncResponse,
                     // fix-24 (E0): render the JSON body on the RestResponse scheduler, not the in-order worker
                     storPoolListToResponse(
-                        requestHelper.offWorker(flux), nodeName, storPoolName, limit, offset)
+                        requestHelper.offWorker(flux, request), nodeName, storPoolName, limit, offset)
                 );
             }
             else

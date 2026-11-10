@@ -152,6 +152,15 @@ public class GrizzlyHttpService implements SystemService
         SystemConfRepository sysConfRepo = injector.getInstance(SystemConfRepository.class);
         AuthTokenRepository authTokenRepository = injector.getInstance(AuthTokenRepository.class);
         restResourceConfig.register(new AuthenticationFilter(authTokenRepository, sysConfRepo, errorReporter));
+        // fix-24b (E2, E2b): byte budget and chunked writes for large answers
+        ResponseBudget responseBudget = ResponseBudget.fromEnvironment();
+        errorReporter.logInfo(
+            "REST response budget: %d MiB global, %d MiB and %d large answers per client",
+            responseBudget.getGlobalCapBytes() / ResponseBudget.MIB,
+            responseBudget.getPerClientCapBytes() / ResponseBudget.MIB,
+            responseBudget.getPerClientCapCount()
+        );
+        restResourceConfig.register(new ResponseBudgetFilter(responseBudget, errorReporter));
         registerExceptionMappers(restResourceConfig);
         lockGuardFactory = injector.getInstance(LockGuardFactory.class);
         systemConfRepository = injector.getInstance(SystemConfRepository.class);
@@ -715,6 +724,8 @@ public class GrizzlyHttpService implements SystemService
         httpServerRef.getServerConfiguration().setAllowPayloadForUndefinedHttpMethods(true);
         installRemoteAddrProbe(httpServerRef);
         setWriteTimeout(httpServerRef);
+        // fix-24b (E2c): a write to a client that does not read blocks after a bounded queue, not after the whole body
+        ResponseBudgetFilter.limitPendingBytes(httpServerRef);
     }
 
     private void setWriteTimeout(HttpServer httpServerRef)
