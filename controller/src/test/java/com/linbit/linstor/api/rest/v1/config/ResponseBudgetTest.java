@@ -1,5 +1,7 @@
 package com.linbit.linstor.api.rest.v1.config;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.Test;
@@ -7,6 +9,7 @@ import org.junit.Test;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 /** fix-24b (E2): accounting of the REST response byte budget. */
 public class ResponseBudgetTest
@@ -160,6 +163,74 @@ public class ResponseBudgetTest
         // the old entry was evicted: no prediction, so admitted (the filter's lease still applies after the render)
         ResponseBudget.RenderTicket ticket = budget.tryAdmitRender("a", VIEW);
         assertNotNull(ticket);
+        ticket.close();
+    }
+
+    @Test
+    public void parallelLargeRendersOfOneClientAreAdmittedOnlyUpToItsCount()
+    {
+        // u25r8 review: 8 concurrent requests for the same ~14 MB target (renders cap 8) must not all render
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 64 * MIB, 4, 8);
+        budget.recordAnswerSize("a", VIEW, 14 * MIB);
+        int admitted = 0;
+        List<ResponseBudget.RenderTicket> tickets = new ArrayList<>();
+        for (int idx = 0; idx < 8; idx++)
+        {
+            ResponseBudget.RenderTicket ticket = budget.tryAdmitRender("a", VIEW);
+            if (ticket != null)
+            {
+                admitted++;
+                tickets.add(ticket);
+            }
+        }
+        assertEquals(4, admitted);
+        assertEquals(4 * 14 * MIB, budget.getGlobalUsedBytes()); // the reservations
+
+        // the filter converts a reservation into the lease of the real size: no double count
+        ResponseBudget.Lease lease = tickets.get(0).toLease(15 * MIB);
+        assertNotNull(lease);
+        assertEquals(3 * 14 * MIB + 15 * MIB, budget.getGlobalUsedBytes());
+        tickets.get(0).close(); // the render ends; the lease stays until the write ends
+        assertEquals(3 * 14 * MIB + 15 * MIB, budget.getGlobalUsedBytes());
+        lease.close();
+
+        // tickets closed without a lease (render failed, small after all) return their reservation
+        tickets.get(1).releaseReservation();
+        tickets.get(1).close();
+        tickets.get(2).close();
+        tickets.get(3).close();
+        assertEquals(0, budget.getGlobalUsedBytes());
+        assertEquals(0, budget.getClientCount());
+        assertEquals(0, budget.getRendersInFlight("a"));
+    }
+
+    @Test
+    public void realSizeLargerThanTheReservationCanStillBeRefused()
+    {
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 32 * MIB, 4, 8);
+        budget.recordAnswerSize("a", VIEW, 14 * MIB);
+        ResponseBudget.RenderTicket first = budget.tryAdmitRender("a", VIEW);
+        ResponseBudget.RenderTicket second = budget.tryAdmitRender("a", VIEW);
+        assertNotNull(first);
+        assertNotNull(second);
+        assertNotNull(first.toLease(14 * MIB));
+        assertNull(second.toLease(20 * MIB)); // 14 + 20 > 32: refused, and the reservation is gone
+        second.close();
+        assertEquals(14 * MIB, budget.getGlobalUsedBytes());
+    }
+
+    @Test
+    public void aTargetWhoseAnswerShrankIsNoLongerGated()
+    {
+        // u25r8 review: a stale large prediction must not keep gating a now-small answer
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 64 * MIB, 1, 8);
+        assertNotNull(budget.tryAcquire("a", 60 * MIB)); // the client holds its count
+        budget.recordAnswerSize("a", VIEW, 20 * MIB);
+        assertNull(budget.tryAdmitRender("a", VIEW));
+        budget.recordAnswerSize("a", VIEW, 2_000); // the last answer was small
+        ResponseBudget.RenderTicket ticket = budget.tryAdmitRender("a", VIEW);
+        assertNotNull(ticket);
+        assertTrue(!ticket.holdsReservation());
         ticket.close();
     }
 }

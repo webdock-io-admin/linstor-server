@@ -85,8 +85,13 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
     @Override
     public void filter(ContainerRequestContext requestCtx, ContainerResponseContext responseCtx)
     {
+        @Nullable Request grizzlyRequest = grizzlyRequest();
+        // E3: the render ticket of this request (from RequestHelper), with a reservation if it was predicted large
+        ResponseBudget.@Nullable RenderTicket ticket = takeTicket(grizzlyRequest);
+
         Object entity = responseCtx.getEntity();
         @Nullable byte[] body = null;
+        long size = -1;
         boolean budgeted = !"HEAD".equalsIgnoreCase(requestCtx.getMethod()) &&
             responseCtx.getStatusInfo().getFamily() == Response.Status.Family.SUCCESSFUL;
         if (!budgeted)
@@ -100,23 +105,30 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
             if (str.length() > LARGE_ENTITY_BYTES / 4)
             {
                 body = str.getBytes(StandardCharsets.UTF_8);
+                size = body.length;
+            }
+            else
+            {
+                size = str.length(); // a lower bound, enough to know the answer is small
             }
         }
         else if (entity instanceof byte[] bytes)
         {
             body = bytes;
+            size = body.length;
         }
 
-        @Nullable Request grizzlyRequest = body == null ? null : grizzlyRequest();
-        if (body != null && grizzlyRequest != null)
+        if (size >= 0 && grizzlyRequest != null)
         {
-            // E3: remember the size for the admission of the next render of the same request-target
-            budget.recordAnswerSize(clientKey(grizzlyRequest), requestTarget(grizzlyRequest), body.length);
+            // E3: remember every 2xx answer's size, small ones too, so a target whose answer shrank stops being gated
+            budget.recordAnswerSize(clientKey(grizzlyRequest), requestTarget(grizzlyRequest), size);
         }
         if (body != null && body.length > LARGE_ENTITY_BYTES)
         {
             String client = clientKey(grizzlyRequest);
-            ResponseBudget.@Nullable Lease lease = budget.tryAcquire(client, body.length);
+            ResponseBudget.@Nullable Lease lease = ticket != null ?
+                ticket.toLease(body.length) :
+                budget.tryAcquire(client, body.length);
             if (lease == null)
             {
                 refuse(responseCtx, client, body.length);
@@ -128,6 +140,26 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
                 responseCtx.setEntity(new ChunkedBody(body, lease, connectionOf(grizzlyRequest)), null, mediaType);
             }
         }
+        else if (ticket != null)
+        {
+            // predicted large, but small (or not budgeted) after all
+            ticket.releaseReservation();
+        }
+    }
+
+    private static ResponseBudget.@Nullable RenderTicket takeTicket(@Nullable Request req)
+    {
+        ResponseBudget.@Nullable RenderTicket ticket = null;
+        if (req != null)
+        {
+            Object attr = req.getAttribute(ResponseBudget.RENDER_TICKET_ATTR);
+            if (attr instanceof ResponseBudget.RenderTicket renderTicket)
+            {
+                req.removeAttribute(ResponseBudget.RENDER_TICKET_ATTR);
+                ticket = renderTicket;
+            }
+        }
+        return ticket;
     }
 
     /** fix-24b (E2c): bound the async write queue of every listener of the server. Call before start(). */
@@ -225,18 +257,7 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
 
     private String clientKey(@Nullable Request req)
     {
-        String key = UNKNOWN_CLIENT;
-        try
-        {
-            if (req != null && req.getRemoteAddr() != null)
-            {
-                key = req.getRemoteAddr();
-            }
-        }
-        catch (RuntimeException ignored)
-        {
-            // no address: all such answers share one client budget
-        }
+        String key = clientKeyOf(req);
         if (UNKNOWN_CLIENT.equals(key) && errorReporter != null && warnedUnknownClient.compareAndSet(false, true))
         {
             errorReporter.logWarning(

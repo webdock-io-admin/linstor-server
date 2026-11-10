@@ -20,7 +20,10 @@ import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -30,6 +33,8 @@ import static org.mockito.Mockito.when;
  */
 public class RequestHelperAdmitRenderTest
 {
+    private static final long MIB = 1024L * 1024L;
+    private final ResponseBudget budget = new ResponseBudget(1000 * MIB, 64 * MIB, 4, 8);
     private RequestHelper helper;
     private String client;
 
@@ -42,9 +47,9 @@ public class RequestHelperAdmitRenderTest
             mock(TransactionMgrGenerator.class),
             mock(LdapAuthentication.class),
             mock(CtrlConfig.class),
-            Schedulers.immediate()
+            Schedulers.immediate(),
+            budget
         );
-        // unique address: the budget is the controller-wide shared one
         client = "test-" + UUID.randomUUID();
     }
 
@@ -59,7 +64,6 @@ public class RequestHelperAdmitRenderTest
     @Test
     public void rendersBeyondTheCapAreRefusedAndTicketsReturnOnTermination()
     {
-        ResponseBudget budget = ResponseBudget.shared();
         int cap = budget.getPerClientCapRenders();
         List<Disposable> inFlight = new ArrayList<>();
         try
@@ -86,5 +90,14 @@ public class RequestHelperAdmitRenderTest
         {
             inFlight.forEach(Disposable::dispose);
         }
+    }
+
+    @Test
+    public void admittedTicketIsHandedToTheFilterOnTheRequest()
+    {
+        Request req = request();
+        helper.offWorker(Flux.just("data"), req).collectList().block();
+        verify(req).setAttribute(eq(ResponseBudget.RENDER_TICKET_ATTR), org.mockito.ArgumentMatchers.notNull());
+        assertNotNull(budget);
     }
 }

@@ -41,6 +41,8 @@ public final class ResponseBudget
      */
     static final long LEASE_MAX_AGE_NANOS = TimeUnit.MINUTES.toNanos(10);
     static final int MAX_REMEMBERED_ANSWERS = 4096;
+    /** Grizzly request attribute that hands the render ticket from RequestHelper to ResponseBudgetFilter. */
+    public static final String RENDER_TICKET_ATTR = "com.linbit.linstor.restRenderTicket";
     /** Answers above this size count as large (the same threshold as ResponseBudgetFilter). */
     static final long LARGE_ANSWER_BYTES = 1024L * 1024L;
 
@@ -237,7 +239,8 @@ public final class ResponseBudget
         int clientRenders = renders == null ? 0 : renders[0];
         boolean fits = clientRenders < perClientCapRenders;
         @Nullable Long predicted = lastAnswerBytes.get(client + " " + target);
-        if (fits && predicted != null && predicted > LARGE_ANSWER_BYTES)
+        boolean predictedLarge = predicted != null && predicted > LARGE_ANSWER_BYTES;
+        if (fits && predictedLarge)
         {
             long[] used = perClient.get(client);
             long clientBytes = used == null ? 0 : used[0];
@@ -254,9 +257,41 @@ public final class ResponseBudget
                 perClientRenders.put(client, renders);
             }
             renders[0]++;
-            ticket = new RenderTicket(client);
+            long reserved = 0;
+            if (predictedLarge)
+            {
+                // reserve the predicted bytes and one count now, so parallel renders see each other
+                reserveLocked(client, predicted);
+                reserved = predicted;
+            }
+            ticket = new RenderTicket(client, reserved);
         }
         return ticket;
+    }
+
+    private void reserveLocked(String client, long bytes)
+    {
+        long[] used = perClient.get(client);
+        if (used == null)
+        {
+            used = new long[2];
+            perClient.put(client, used);
+        }
+        used[0] += bytes;
+        used[1]++;
+        globalUsedBytes += bytes;
+    }
+
+    private synchronized void releaseReservation(String client, long bytes)
+    {
+        releaseLocked(client, bytes);
+    }
+
+    /** Swaps a ticket's reservation for a lease of the real size (one atomic step). Null if the real size does not fit. */
+    private synchronized @Nullable Lease convertReservation(String client, long reservedBytes, long bytes)
+    {
+        releaseLocked(client, reservedBytes);
+        return tryAcquire(client, bytes);
     }
 
     private synchronized void releaseRender(String client)
@@ -284,20 +319,60 @@ public final class ResponseBudget
         return perClientCapRenders;
     }
 
-    /** One render in flight for a client (fix-24b E3). Idempotent close. */
+    /**
+     * One render in flight for a client (fix-24b E3). If the answer was predicted large, the ticket also holds a
+     * reservation of the predicted bytes and one count. ResponseBudgetFilter converts it into the lease of the real
+     * size ({@link #toLease(long)}) or drops it ({@link #releaseReservation()}). Closing the ticket ends the render and
+     * drops a reservation that is still held. All idempotent.
+     */
     public final class RenderTicket implements AutoCloseable
     {
         private final String client;
+        private long reservedBytes;
+        private boolean reservationHeld;
         private boolean closed;
 
-        private RenderTicket(String clientRef)
+        private RenderTicket(String clientRef, long reservedBytesRef)
         {
             client = clientRef;
+            reservedBytes = reservedBytesRef;
+            reservationHeld = reservedBytesRef > 0;
+        }
+
+        private synchronized boolean takeReservation()
+        {
+            boolean held = reservationHeld;
+            reservationHeld = false;
+            return held;
+        }
+
+        /** Lease for the real size, using this ticket's reservation if it still holds one. Null if it does not fit. */
+        public @Nullable Lease toLease(long bytes)
+        {
+            return takeReservation() ?
+                convertReservation(client, reservedBytes, bytes) :
+                ResponseBudget.this.tryAcquire(client, bytes);
+        }
+
+        /** Drops the reservation (e.g. the answer was small after all). */
+        public void releaseReservation()
+        {
+            if (takeReservation())
+            {
+                ResponseBudget.this.releaseReservation(client, reservedBytes);
+            }
+        }
+
+        // package-private for tests
+        synchronized boolean holdsReservation()
+        {
+            return reservationHeld;
         }
 
         @Override
         public void close()
         {
+            releaseReservation();
             boolean doRelease;
             synchronized (this)
             {

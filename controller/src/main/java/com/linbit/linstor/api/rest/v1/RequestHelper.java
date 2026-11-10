@@ -62,7 +62,7 @@ public class RequestHelper
     private final CtrlConfig linstorConfig;
     private final Scheduler restResponseScheduler;
 
-    private final ResponseBudget responseBudget = ResponseBudget.shared();
+    private final ResponseBudget responseBudget;
 
     /** fix-24 (D): seconds a client is asked to wait when the RestResponse queue is full (503). */
     static final String RETRY_AFTER_SEC = "5";
@@ -77,6 +77,29 @@ public class RequestHelper
         @Named(ControllerCoreModule.REST_RESPONSE_SCHEDULER) Scheduler restResponseSchedulerRef
     )
     {
+        this(
+            errorReporterRef,
+            apiCallScopeRef,
+            transactionMgrGeneratorRef,
+            ldapAuthenticationRef,
+            linstorConfigRef,
+            restResponseSchedulerRef,
+            ResponseBudget.shared()
+        );
+    }
+
+    // package-private for tests: a budget of their own instead of the controller-wide shared one
+    RequestHelper(
+        ErrorReporter errorReporterRef,
+        LinStorScope apiCallScopeRef,
+        TransactionMgrGenerator transactionMgrGeneratorRef,
+        LdapAuthentication ldapAuthenticationRef,
+        CtrlConfig linstorConfigRef,
+        Scheduler restResponseSchedulerRef,
+        ResponseBudget responseBudgetRef
+    )
+    {
+        responseBudget = responseBudgetRef;
         restResponseScheduler = restResponseSchedulerRef;
         errorReporter = errorReporterRef;
         apiCallScope = apiCallScopeRef;
@@ -395,6 +418,11 @@ public class RequestHelper
             ResponseBudgetFilter.requestTarget(request)
         );
         ticketRef.set(ticket);
+        if (ticket != null)
+        {
+            // hand the ticket (and a reservation, if any) to ResponseBudgetFilter, which turns it into the lease
+            request.setAttribute(ResponseBudget.RENDER_TICKET_ATTR, ticket);
+        }
         return ticket != null;
     }
 
