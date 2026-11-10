@@ -251,4 +251,51 @@ public class ResponseBudgetFilterServerTest
         assertEquals(0, budget.getGlobalUsedBytes());
         assertEquals("HTTP/1.1 200 OK", requestAndStall(port));
     }
+
+    @Test
+    public void writeTimeoutClosesTheConnection() throws Exception
+    {
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 1000 * MIB, 1000);
+        int port = start(budget);
+        long start = System.currentTimeMillis();
+        assertEquals("HTTP/1.1 200 OK", requestAndStall(port));
+        Socket sock = sockets.get(0);
+        waitFor(() -> budget.getGlobalUsedBytes() == 0, (WRITE_TIMEOUT_SEC + 8) * 1000L);
+        long releasedAfterMs = System.currentTimeMillis() - start;
+        assertEquals(0, budget.getGlobalUsedBytes());
+        // the write ended by the timeout, not by completing into the kernel's buffers
+        assertTrue("lease released after " + releasedAfterMs + " ms", releasedAfterMs >= (WRITE_TIMEOUT_SEC - 1) * 1000L);
+
+        // after the write timeout the server must have closed the connection: reading drains what was sent and
+        // then sees EOF (or a reset), well before the client's own read timeout
+        sock.setSoTimeout(5_000);
+        InputStream in = sock.getInputStream();
+        byte[] buf = new byte[64 * 1024];
+        long end = System.currentTimeMillis() + 5_000;
+        boolean closed = false;
+        long received = 0;
+        try
+        {
+            while (System.currentTimeMillis() < end)
+            {
+                int got = in.read(buf);
+                if (got < 0)
+                {
+                    closed = true;
+                    break;
+                }
+                received += got;
+            }
+        }
+        catch (java.net.SocketException reset)
+        {
+            closed = true;
+        }
+        catch (java.net.SocketTimeoutException stillOpen)
+        {
+            closed = false;
+        }
+        assertTrue("server kept the timed-out connection open", closed);
+        assertTrue("whole body arrived (" + received + " bytes): the write did not time out", received < BODY_MIB * MIB);
+    }
 }
