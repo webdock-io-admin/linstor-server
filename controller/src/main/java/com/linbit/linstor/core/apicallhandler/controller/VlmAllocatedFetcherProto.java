@@ -65,6 +65,8 @@ public class VlmAllocatedFetcherProto implements VlmAllocatedFetcher
     private final SatelliteCallGuard satelliteCallGuard;
 
     private final ErrorReporter errorReporter;
+    /** fix-24b (E3d): per-node answers slower than this are logged at INFO. */
+    private static final long SLOW_ANSWER_MS = 1_000;
 
     @Inject
     public VlmAllocatedFetcherProto(
@@ -222,12 +224,30 @@ public class VlmAllocatedFetcherProto implements VlmAllocatedFetcher
         {
             long startNanos = System.nanoTime();
             return guarded.doFinally(
-                signal -> errorReporter.logInfo(
-                    "RequestVlmAllocated answer from %s: %s after %d ms",
-                    nodeName,
-                    signal,
-                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos)
-                )
+                signal ->
+                {
+                    long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+                    // u25r8 review: INFO only when slow or not completed normally, else DEBUG (1 + N lines per list
+                    // request would flood the log under a polling client)
+                    if (elapsedMs > SLOW_ANSWER_MS || signal != reactor.core.publisher.SignalType.ON_COMPLETE)
+                    {
+                        errorReporter.logInfo(
+                            "RequestVlmAllocated answer from %s: %s after %d ms",
+                            nodeName,
+                            signal,
+                            elapsedMs
+                        );
+                    }
+                    else
+                    {
+                        errorReporter.logDebug(
+                            "RequestVlmAllocated answer from %s: %s after %d ms",
+                            nodeName,
+                            signal,
+                            elapsedMs
+                        );
+                    }
+                }
             );
         });
     }

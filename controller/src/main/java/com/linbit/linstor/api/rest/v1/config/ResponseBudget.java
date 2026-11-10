@@ -205,7 +205,13 @@ public final class ResponseBudget
      * Takes a lease for <code>bytes</code>, or returns null if the answer does not fit. Close the lease when the write
      * ends.
      */
-    public synchronized @Nullable Lease tryAcquire(String client, long bytes)
+    public @Nullable Lease tryAcquire(String client, long bytes)
+    {
+        expireOldTickets();
+        return tryAcquireLocked(client, bytes);
+    }
+
+    private synchronized @Nullable Lease tryAcquireLocked(String client, long bytes)
     {
         expireOldLeases();
         @Nullable Lease lease = null;
@@ -242,7 +248,13 @@ public final class ResponseBudget
      * not fit the client's count or byte budget, or the global budget. Answers predicted small are only limited by the
      * renders cap. Close the ticket when the render is done; the byte lease is still taken by ResponseBudgetFilter.
      */
-    public synchronized @Nullable RenderTicket tryAdmitRender(String client, String target)
+    public @Nullable RenderTicket tryAdmitRender(String client, String target)
+    {
+        expireOldTickets();
+        return tryAdmitRenderLocked(client, target);
+    }
+
+    private synchronized @Nullable RenderTicket tryAdmitRenderLocked(String client, String target)
     {
         expireOldLeases();
         @Nullable RenderTicket ticket = null;
@@ -317,7 +329,7 @@ public final class ResponseBudget
     private synchronized @Nullable Lease convertReservation(String client, long reservedBytes, long bytes)
     {
         releaseLocked(client, reservedBytes);
-        return tryAcquire(client, bytes);
+        return tryAcquireLocked(client, bytes);
     }
 
     private synchronized void releaseRender(RenderTicket ticket)
@@ -429,7 +441,8 @@ public final class ResponseBudget
         }
     }
 
-    private void expireOldTickets()
+    /** Removes the expired render tickets from the active set (in the monitor); the caller closes them outside. */
+    private synchronized List<RenderTicket> takeExpiredTickets()
     {
         long now = clock.nanoTime();
         Iterator<RenderTicket> iter = activeTickets.iterator();
@@ -443,26 +456,41 @@ public final class ResponseBudget
             }
             iter.remove();
             expired.add(oldest);
+            expiredTicketCount++;
         }
+        return expired;
+    }
+
+    /**
+     * Releases expired render tickets, logging outside the budget monitor (u25r8 review: a burst of expiries must not
+     * serialise the REST path on log I/O). close() re-enters the monitor for the release itself.
+     */
+    private void expireOldTickets()
+    {
+        List<RenderTicket> expired = takeExpiredTickets();
         for (RenderTicket ticket : expired)
         {
-            expiredTicketCount++;
-            if (errorReporter != null)
+            ErrorReporter reporter = errorReporterSnapshot();
+            if (reporter != null)
             {
-                errorReporter.logWarning(
+                reporter.logWarning(
                     "REST response budget: render ticket of %s older than %d s, released (%s)",
                     ticket.client,
                     TimeUnit.NANOSECONDS.toSeconds(TICKET_MAX_AGE_NANOS),
                     describeClient(ticket.client)
                 );
             }
-            ticket.close(); // re-enters this monitor; releases the reservation and the render
+            ticket.close();
         }
+    }
+
+    private synchronized @Nullable ErrorReporter errorReporterSnapshot()
+    {
+        return errorReporter;
     }
 
     private void expireOldLeases()
     {
-        expireOldTickets();
         long now = clock.nanoTime();
         Iterator<Lease> iter = active.iterator();
         while (iter.hasNext())
