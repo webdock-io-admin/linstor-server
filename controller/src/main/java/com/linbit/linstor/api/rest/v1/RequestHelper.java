@@ -389,6 +389,11 @@ public class RequestHelper
             }
             else if (!admitRender(request, ticketRef))
             {
+                // u25r8: make a pinned client visible
+                errorReporter.logWarning(
+                    "REST answer refused before render: %s",
+                    responseBudget.describeClient(ResponseBudgetFilter.clientKeyOf(request))
+                );
                 ret = Flux.error(new RenderRefusedException());
             }
             else
@@ -493,7 +498,6 @@ public class RequestHelper
         }
         else if (exc instanceof RenderRefusedException)
         {
-            errorReporter.logWarning("REST answer refused before render: %s", exc.getMessage());
             apiCallRc.addEntry(
                 ApiCallRcImpl.simpleEntry(
                     ApiConsts.FAIL_UNKNOWN_ERROR,

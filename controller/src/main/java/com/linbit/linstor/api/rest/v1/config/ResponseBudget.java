@@ -1,10 +1,12 @@
 package com.linbit.linstor.api.rest.v1.config;
 
 import com.linbit.linstor.annotation.Nullable;
+import com.linbit.linstor.logging.ErrorReporter;
 
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -41,6 +43,12 @@ public final class ResponseBudget
      */
     static final long LEASE_MAX_AGE_NANOS = TimeUnit.MINUTES.toNanos(10);
     static final int MAX_REMEMBERED_ANSWERS = 4096;
+    /**
+     * Safety net for render tickets (u25r8 review of E3b): a ticket older than this is released with a warning. A
+     * request normally ends well before: the satellite fan-out has a 30 s per-node timeout (fix 24 A), but the walk can
+     * wait on the fair read locks behind a long writer.
+     */
+    static final long TICKET_MAX_AGE_NANOS = TimeUnit.SECONDS.toNanos(120);
     /** Grizzly request attribute that hands the render ticket from RequestHelper to ResponseBudgetFilter. */
     public static final String RENDER_TICKET_ATTR = "com.linbit.linstor.restRenderTicket";
     /** Answers above this size count as large (the same threshold as ResponseBudgetFilter). */
@@ -68,6 +76,9 @@ public final class ResponseBudget
     private final LinkedHashSet<Lease> active = new LinkedHashSet<>(); // oldest first
     private final NanoClock clock;
     private long expiredCount;
+    private final LinkedHashSet<RenderTicket> activeTickets = new LinkedHashSet<>(); // oldest first
+    private long expiredTicketCount;
+    private @Nullable ErrorReporter errorReporter;
 
     @FunctionalInterface
     interface NanoClock
@@ -264,7 +275,22 @@ public final class ResponseBudget
                 reserveLocked(client, predicted);
                 reserved = predicted;
             }
-            ticket = new RenderTicket(client, reserved);
+            ticket = new RenderTicket(client, reserved, clock.nanoTime());
+            activeTickets.add(ticket);
+            // fix-24b (E3d): log admissions that may be large (predicted large, or never seen) and their release, so
+            // "large renders per address" can be read from the log. Predicted-small answers (polling) stay quiet.
+            if (errorReporter != null && (predicted == null || predictedLarge))
+            {
+                ticket.logged = true;
+                ticket.target = target;
+                errorReporter.logInfo(
+                    "REST render admitted: %s %s, predicted %s, renders in flight %d",
+                    client,
+                    target,
+                    predicted == null ? "unknown" : predicted + " bytes",
+                    renders[0]
+                );
+            }
         }
         return ticket;
     }
@@ -294,8 +320,10 @@ public final class ResponseBudget
         return tryAcquire(client, bytes);
     }
 
-    private synchronized void releaseRender(String client)
+    private synchronized void releaseRender(RenderTicket ticket)
     {
+        activeTickets.remove(ticket);
+        String client = ticket.client;
         int[] renders = perClientRenders.get(client);
         if (renders != null)
         {
@@ -328,14 +356,18 @@ public final class ResponseBudget
     public final class RenderTicket implements AutoCloseable
     {
         private final String client;
-        private long reservedBytes;
+        private final long reservedBytes;
+        private final long acquiredNanos;
         private boolean reservationHeld;
         private boolean closed;
+        private boolean logged;
+        private @Nullable String target;
 
-        private RenderTicket(String clientRef, long reservedBytesRef)
+        private RenderTicket(String clientRef, long reservedBytesRef, long acquiredNanosRef)
         {
             client = clientRef;
             reservedBytes = reservedBytesRef;
+            acquiredNanos = acquiredNanosRef;
             reservationHeld = reservedBytesRef > 0;
         }
 
@@ -381,13 +413,56 @@ public final class ResponseBudget
             }
             if (doRelease)
             {
-                releaseRender(client);
+                releaseRender(this);
+                ErrorReporter reporter = errorReporter;
+                if (logged && reporter != null)
+                {
+                    reporter.logInfo(
+                        "REST render released: %s %s after %d ms, renders in flight %d",
+                        client,
+                        target,
+                        TimeUnit.NANOSECONDS.toMillis(clock.nanoTime() - acquiredNanos),
+                        getRendersInFlight(client)
+                    );
+                }
             }
+        }
+    }
+
+    private void expireOldTickets()
+    {
+        long now = clock.nanoTime();
+        Iterator<RenderTicket> iter = activeTickets.iterator();
+        List<RenderTicket> expired = new java.util.ArrayList<>();
+        while (iter.hasNext())
+        {
+            RenderTicket oldest = iter.next();
+            if (now - oldest.acquiredNanos < TICKET_MAX_AGE_NANOS)
+            {
+                break;
+            }
+            iter.remove();
+            expired.add(oldest);
+        }
+        for (RenderTicket ticket : expired)
+        {
+            expiredTicketCount++;
+            if (errorReporter != null)
+            {
+                errorReporter.logWarning(
+                    "REST response budget: render ticket of %s older than %d s, released (%s)",
+                    ticket.client,
+                    TimeUnit.NANOSECONDS.toSeconds(TICKET_MAX_AGE_NANOS),
+                    describeClient(ticket.client)
+                );
+            }
+            ticket.close(); // re-enters this monitor; releases the reservation and the render
         }
     }
 
     private void expireOldLeases()
     {
+        expireOldTickets();
         long now = clock.nanoTime();
         Iterator<Lease> iter = active.iterator();
         while (iter.hasNext())
@@ -436,6 +511,36 @@ public final class ResponseBudget
     public synchronized long getGlobalUsedBytes()
     {
         return globalUsedBytes;
+    }
+
+    /** Where the ticket safety net logs its warnings (set by GrizzlyHttpService). */
+    public synchronized void setErrorReporter(@Nullable ErrorReporter errorReporterRef)
+    {
+        errorReporter = errorReporterRef;
+    }
+
+    /** Render tickets released by the age safety net since start. */
+    public synchronized long getExpiredTicketCount()
+    {
+        return expiredTicketCount;
+    }
+
+    /** One line for logs: the client's renders in flight and large answers / bytes held (reservations included). */
+    public synchronized String describeClient(String client)
+    {
+        long[] used = perClient.get(client);
+        return String.format(
+            "%s: %d of %d renders in flight, %d of %d large answers, %d of %d bytes; global %d of %d bytes",
+            client,
+            getRendersInFlight(client),
+            perClientCapRenders,
+            used == null ? 0 : used[1],
+            perClientCapCount,
+            used == null ? 0 : used[0],
+            perClientCapBytes,
+            globalUsedBytes,
+            globalCapBytes
+        );
     }
 
     // package-private for tests

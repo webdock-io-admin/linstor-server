@@ -233,4 +233,57 @@ public class ResponseBudgetTest
         assertTrue(!ticket.holdsReservation());
         ticket.close();
     }
+
+    @Test
+    public void renderTicketsOlderThanTheMaxAgeAreReleasedOnTheNextAdmission()
+    {
+        // u25r8 note a: a ticket pinned e.g. behind a long writer on the read locks must not hold its slots forever
+        AtomicLong now = new AtomicLong(0);
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 64 * MIB, 4, 1, now::get);
+        budget.setErrorReporter(new com.linbit.linstor.testutils.EmptyErrorReporter());
+        budget.recordAnswerSize("a", VIEW, 20 * MIB);
+        ResponseBudget.RenderTicket pinned = budget.tryAdmitRender("a", VIEW);
+        assertNotNull(pinned);
+        assertEquals(20 * MIB, budget.getGlobalUsedBytes()); // the reservation
+        assertNull(budget.tryAdmitRender("a", VIEW)); // renders cap 1
+
+        now.set(ResponseBudget.TICKET_MAX_AGE_NANOS);
+        ResponseBudget.RenderTicket next = budget.tryAdmitRender("a", VIEW);
+        assertNotNull(next);
+        assertEquals(1, budget.getExpiredTicketCount());
+        assertEquals(20 * MIB, budget.getGlobalUsedBytes()); // only the new reservation
+        assertEquals(1, budget.getRendersInFlight("a"));
+
+        pinned.close(); // a late close of the expired ticket must not release twice
+        assertEquals(1, budget.getRendersInFlight("a"));
+        assertEquals(20 * MIB, budget.getGlobalUsedBytes());
+        next.close();
+        assertEquals(0, budget.getGlobalUsedBytes());
+        assertTrue(budget.describeClient("a").startsWith("a: 0 of 1 renders in flight"));
+    }
+
+    @Test
+    public void admissionAndReleaseAreLoggedForLargeOrUnknownTargetsOnly()
+    {
+        List<String> infos = new ArrayList<>();
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 64 * MIB, 4, 8);
+        budget.setErrorReporter(
+            new com.linbit.linstor.testutils.EmptyErrorReporter()
+            {
+                @Override
+                public void logInfo(String format, Object... args)
+                {
+                    infos.add(String.format(format, args));
+                }
+            }
+        );
+        budget.tryAdmitRender("a", "/never-seen").close();
+        budget.recordAnswerSize("a", VIEW, 20 * MIB);
+        budget.tryAdmitRender("a", VIEW).close();
+        budget.recordAnswerSize("a", "/small", 100);
+        budget.tryAdmitRender("a", "/small").close();
+        assertEquals(4, infos.size()); // 2 admissions + 2 releases; the small target is quiet
+        assertTrue(infos.get(0).startsWith("REST render admitted: a /never-seen, predicted unknown"));
+        assertTrue(infos.get(3).startsWith("REST render released: a /v1/view/resources after"));
+    }
 }

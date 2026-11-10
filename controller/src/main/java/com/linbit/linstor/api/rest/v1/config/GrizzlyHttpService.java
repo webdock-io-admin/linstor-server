@@ -154,6 +154,7 @@ public class GrizzlyHttpService implements SystemService
         restResourceConfig.register(new AuthenticationFilter(authTokenRepository, sysConfRepo, errorReporter));
         // fix-24b (E2, E2b): byte budget and chunked writes for large answers
         ResponseBudget responseBudget = ResponseBudget.shared();
+        responseBudget.setErrorReporter(errorReporter);
         errorReporter.logInfo(
             "REST response budget: %d MiB global, %d MiB and %d large answers per client, %d renders in flight per client",
             responseBudget.getGlobalCapBytes() / ResponseBudget.MIB,
