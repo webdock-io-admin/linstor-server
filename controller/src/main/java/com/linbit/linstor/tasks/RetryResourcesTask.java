@@ -5,9 +5,11 @@ import com.linbit.linstor.annotation.Nullable;
 import com.linbit.linstor.api.ApiCallRc;
 import com.linbit.linstor.api.ApiModule;
 import com.linbit.linstor.api.interfaces.serializer.CtrlStltSerializer;
+import com.linbit.linstor.core.apicallhandler.controller.CtrlRscDfnDeleteApiCallHandler;
 import com.linbit.linstor.core.apicallhandler.controller.internal.CtrlSatelliteUpdateCaller;
 import com.linbit.linstor.core.apicallhandler.response.ApiRcException;
 import com.linbit.linstor.core.identifier.NodeName;
+import com.linbit.linstor.core.identifier.ResourceName;
 import com.linbit.linstor.core.objects.Node;
 import com.linbit.linstor.core.objects.Resource;
 import com.linbit.linstor.logging.ErrorReporter;
@@ -16,11 +18,13 @@ import com.linbit.linstor.netcom.PeerNotConnectedException;
 import com.linbit.linstor.tasks.TaskScheduleService.Task;
 
 import javax.inject.Inject;
+import javax.inject.Provider;
 import javax.inject.Singleton;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
@@ -50,15 +54,19 @@ public class RetryResourcesTask implements Task
 
     private final CtrlStltSerializer serializer;
     private final ErrorReporter errorReporter;
+    // Provider: CtrlRscDfnDeleteApiCallHandler depends (via truncate and the satellite update caller) on this task
+    private final Provider<CtrlRscDfnDeleteApiCallHandler> rscDfnDeleteHandlerProvider;
 
     @Inject
     public RetryResourcesTask(
         CtrlStltSerializer serializerRef,
-        ErrorReporter errorReporterRef
+        ErrorReporter errorReporterRef,
+        Provider<CtrlRscDfnDeleteApiCallHandler> rscDfnDeleteHandlerProviderRef
     )
     {
         serializer = serializerRef;
         errorReporter = errorReporterRef;
+        rscDfnDeleteHandlerProvider = rscDfnDeleteHandlerProviderRef;
     }
 
     public boolean add(Resource rsc, @Nullable Publisher<ApiCallRc> nextStepRef)
@@ -133,39 +141,7 @@ public class RetryResourcesTask implements Task
                         rsc.getResourceDefinition().getName().displayValue
                     );
 
-                    // only update the one satellite, not every involved satellites
-                    Publisher<ApiCallRc> nextStep = retryConfig.fluxAfterSuccess;
-                    if (nextStep == null)
-                    {
-                        nextStep = Flux.empty();
-                    }
-
-                    peer.apiCall(
-                        InternalApiConsts.API_CHANGED_RSC,
-                        serializer
-                            .headerlessBuilder()
-                            .changedResource(
-                                rsc.getUuid(),
-                                rsc.getResourceDefinition().getName().displayValue
-                            )
-                            .build()
-                    ).map(
-                        inputStream -> CtrlSatelliteUpdateCaller.deserializeApiCallRc(
-                            nodeName,
-                            inputStream
-                        )
-                    )
-                        .concatWith(nextStep)
-                        .onErrorResume(ApiRcException.class, ignore -> Flux.empty())
-                        .onErrorResume(PeerNotConnectedException.class, ignore -> Flux.empty())
-                        .contextWrite(
-                            Context.of(
-                                ApiModule.API_CALL_NAME,
-                                RSC_RETRY_API_NAME,
-                                Peer.class, peer
-                            )
-                        )
-                        .subscribe();
+                    retryFlux(rsc, peer, nodeName, retryConfig.fluxAfterSuccess).subscribe();
                 }
                 else
                 {
@@ -178,6 +154,53 @@ public class RetryResourcesTask implements Task
             }
         }
         return getNextFutureReschedule(scheduleAt, TASK_TIMEOUT);
+    }
+
+    /**
+     * The retry of one resource: only update the one satellite, not every involved satellite. Package-private for
+     * tests.
+     */
+    Flux<ApiCallRc> retryFlux(Resource rsc, Peer peer, NodeName nodeName, @Nullable Publisher<ApiCallRc> nextStepRef)
+    {
+        Publisher<ApiCallRc> nextStep = nextStepRef == null ? Flux.empty() : nextStepRef;
+        // read now: the next step may delete the resource
+        ResourceName rscName = rsc.getResourceDefinition().getName();
+        AtomicBoolean retryAnsweredError = new AtomicBoolean(false);
+
+        return peer.apiCall(
+            InternalApiConsts.API_CHANGED_RSC,
+            serializer
+                .headerlessBuilder()
+                .changedResource(
+                    rsc.getUuid(),
+                    rscName.displayValue
+                )
+                .build()
+        ).map(
+            inputStream -> CtrlSatelliteUpdateCaller.deserializeApiCallRc(
+                nodeName,
+                inputStream
+            )
+        )
+            .doOnNext(apiCallRc -> retryAnsweredError.compareAndSet(false, apiCallRc.hasErrors()))
+            .concatWith(nextStep)
+            // fix-26: if this resource was part of a resource-definition delete and the satellite's answer to the
+            // retry had no error, finish that delete
+            .concatWith(Flux.defer(() -> retryAnsweredError.get() ? Flux.empty() : finishRscDfnDelete(rscName)))
+            .onErrorResume(ApiRcException.class, ignore -> Flux.empty())
+            .onErrorResume(PeerNotConnectedException.class, ignore -> Flux.empty())
+            .contextWrite(
+                Context.of(
+                    ApiModule.API_CALL_NAME,
+                    RSC_RETRY_API_NAME,
+                    Peer.class, peer
+                )
+            );
+    }
+
+    private Flux<ApiCallRc> finishRscDfnDelete(ResourceName rscName)
+    {
+        return rscDfnDeleteHandlerProvider.get().finishDeleteIfFlagged(rscName);
     }
 
     private List<RetryConfig> getResourcesToRetry()
