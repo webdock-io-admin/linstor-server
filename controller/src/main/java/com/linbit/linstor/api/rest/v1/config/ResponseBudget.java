@@ -15,6 +15,9 @@ import java.util.concurrent.TimeUnit;
  * hold N rendered bodies (LINBIT/linstor-server#572). Each large answer takes a lease for its size before it is
  * written and returns it when the write ends (success, error or write timeout). An answer that does not fit the
  * global budget, its client's byte budget or its client's count of large answers is refused (503).
+ *
+ * A lease whose write never ran or never ended is returned by a safety net after {@link #LEASE_MAX_AGE_NANOS}, checked
+ * on each acquire (so it is reclaimed when the next large answer asks, not on a timer).
  */
 public final class ResponseBudget
 {

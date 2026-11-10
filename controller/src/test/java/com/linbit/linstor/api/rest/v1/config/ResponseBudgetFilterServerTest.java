@@ -5,6 +5,7 @@ import javax.ws.rs.Path;
 import javax.ws.rs.Produces;
 import javax.ws.rs.core.MediaType;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;
@@ -17,7 +18,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPInputStream;
 
+import org.glassfish.grizzly.http.CompressionConfig;
 import org.glassfish.grizzly.http.server.HttpServer;
 import org.glassfish.grizzly.http.server.NetworkListener;
 import org.glassfish.jersey.grizzly2.httpserver.GrizzlyHttpServerFactory;
@@ -36,7 +39,7 @@ public class ResponseBudgetFilterServerTest
 {
     private static final int BODY_MIB = 4;
     private static final long MIB = ResponseBudget.MIB;
-    private static final int WRITE_TIMEOUT_SEC = 2;
+    private static final int WRITE_TIMEOUT_SEC = 4;
     private static final String BODY;
 
     static
@@ -86,6 +89,10 @@ public class ResponseBudgetFilterServerTest
         for (NetworkListener listener : server.getListeners())
         {
             listener.getTransport().setWriteTimeout(WRITE_TIMEOUT_SEC, TimeUnit.SECONDS);
+            // as GrizzlyHttpService.enableCompression
+            CompressionConfig compression = listener.getCompressionConfig();
+            compression.setCompressionMode(CompressionConfig.CompressionMode.ON);
+            compression.setCompressibleMimeTypes("application/json");
         }
         ResponseBudgetFilter.limitPendingBytes(server);
         server.start();
@@ -95,16 +102,32 @@ public class ResponseBudgetFilterServerTest
     /** Sends the request, reads only the status line, and then never reads again. */
     private String requestAndStall(int port) throws IOException
     {
+        return requestAndStall(port, "GET", "");
+    }
+
+    private String requestAndStall(int port, String method, String extraHeaders) throws IOException
+    {
+        Socket sock = connect(port, method, extraHeaders);
+        return readLine(sock.getInputStream());
+    }
+
+    private Socket connect(int port, String method, String extraHeaders) throws IOException
+    {
         Socket sock = new Socket();
         sockets.add(sock);
         sock.setReceiveBufferSize(4096);
         sock.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 5_000);
         sock.setSoTimeout(10_000);
         sock.getOutputStream().write(
-            "GET /big HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n".getBytes(StandardCharsets.US_ASCII)
+            (method + " /big HTTP/1.1\r\nHost: test\r\nConnection: close\r\n" + extraHeaders + "\r\n")
+                .getBytes(StandardCharsets.US_ASCII)
         );
         sock.getOutputStream().flush();
-        InputStream in = sock.getInputStream();
+        return sock;
+    }
+
+    private static String readLine(InputStream in) throws IOException
+    {
         StringBuilder line = new StringBuilder();
         int chr;
         while ((chr = in.read()) != -1 && chr != '\n')
@@ -178,5 +201,54 @@ public class ResponseBudgetFilterServerTest
         sockets.get(0).close();
         waitFor(() -> budget.getGlobalUsedBytes() == 0, (WRITE_TIMEOUT_SEC + 8) * 1000L);
         assertEquals(0, budget.getGlobalUsedBytes());
+    }
+
+    @Test
+    public void gzipAnswerArrivesCompleteAndReturnsItsLease() throws Exception
+    {
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 1000 * MIB, 1000);
+        int port = start(budget);
+        Socket sock = connect(port, "GET", "Accept-Encoding: gzip\r\n");
+        InputStream in = sock.getInputStream();
+        assertEquals("HTTP/1.1 200 OK", readLine(in));
+        boolean gzip = false;
+        boolean chunked = false;
+        String header = readLine(in);
+        while (!header.isEmpty())
+        {
+            String lower = header.toLowerCase(java.util.Locale.ROOT);
+            gzip |= lower.equals("content-encoding: gzip");
+            chunked |= lower.equals("transfer-encoding: chunked");
+            header = readLine(in);
+        }
+        assertTrue("expected a gzip answer", gzip);
+        assertTrue("expected chunked framing", chunked);
+        ByteArrayOutputStream compressed = new ByteArrayOutputStream();
+        while (true)
+        {
+            int size = Integer.parseInt(readLine(in).trim(), 16);
+            if (size == 0)
+            {
+                break;
+            }
+            compressed.write(in.readNBytes(size));
+            readLine(in); // CRLF after the chunk
+        }
+        try (InputStream unzip = new GZIPInputStream(new java.io.ByteArrayInputStream(compressed.toByteArray())))
+        {
+            assertEquals(BODY_MIB * MIB, unzip.readAllBytes().length);
+        }
+        waitFor(() -> budget.getGlobalUsedBytes() == 0, 5_000);
+        assertEquals(0, budget.getGlobalUsedBytes());
+    }
+
+    @Test
+    public void headTakesNoLease() throws Exception
+    {
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 1000 * MIB, 1);
+        int port = start(budget);
+        assertEquals("HTTP/1.1 200 OK", requestAndStall(port, "HEAD", ""));
+        assertEquals(0, budget.getGlobalUsedBytes());
+        assertEquals("HTTP/1.1 200 OK", requestAndStall(port));
     }
 }
