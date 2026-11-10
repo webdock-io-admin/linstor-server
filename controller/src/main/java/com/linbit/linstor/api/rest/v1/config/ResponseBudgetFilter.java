@@ -107,9 +107,14 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
             body = bytes;
         }
 
+        @Nullable Request grizzlyRequest = body == null ? null : grizzlyRequest();
+        if (body != null && grizzlyRequest != null)
+        {
+            // E3: remember the size for the admission of the next render of the same request-target
+            budget.recordAnswerSize(clientKey(grizzlyRequest), requestTarget(grizzlyRequest), body.length);
+        }
         if (body != null && body.length > LARGE_ENTITY_BYTES)
         {
-            @Nullable Request grizzlyRequest = grizzlyRequest();
             String client = clientKey(grizzlyRequest);
             ResponseBudget.@Nullable Lease lease = budget.tryAcquire(client, body.length);
             if (lease == null)
@@ -177,6 +182,13 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
         return req;
     }
 
+    /** "path?query" of the request, the key for the size prediction (fix-24b E3). */
+    public static String requestTarget(Request req)
+    {
+        String query = req.getQueryString();
+        return query == null ? req.getRequestURI() : req.getRequestURI() + "?" + query;
+    }
+
     private static @Nullable Connection<?> connectionOf(@Nullable Request req)
     {
         @Nullable Connection<?> conn = null;
@@ -192,6 +204,23 @@ public class ResponseBudgetFilter implements ContainerResponseFilter
             // cannot terminate on a failed write; the lease is still returned
         }
         return conn;
+    }
+
+    public static String clientKeyOf(@Nullable Request req)
+    {
+        String key = UNKNOWN_CLIENT;
+        try
+        {
+            if (req != null && req.getRemoteAddr() != null)
+            {
+                key = req.getRemoteAddr();
+            }
+        }
+        catch (RuntimeException ignored)
+        {
+            // no address: all such answers share one client budget
+        }
+        return key;
     }
 
     private String clientKey(@Nullable Request req)

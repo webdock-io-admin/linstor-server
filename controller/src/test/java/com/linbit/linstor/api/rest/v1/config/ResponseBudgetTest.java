@@ -90,4 +90,76 @@ public class ResponseBudgetTest
     {
         new ResponseBudget(0, 1, 1);
     }
+
+    private static final String VIEW = "/v1/view/resources";
+
+    @Test
+    public void largeAnswerIsRefusedBeforeRenderingWhenTheClientHasItsCount()
+    {
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 1000 * MIB, 2, 10);
+        budget.recordAnswerSize("a", VIEW, 20 * MIB);
+        assertNotNull(budget.tryAcquire("a", 20 * MIB));
+        assertNotNull(budget.tryAcquire("a", 20 * MIB));
+        assertNull(budget.tryAdmitRender("a", VIEW));
+        // another client is not affected
+        budget.recordAnswerSize("b", VIEW, 20 * MIB);
+        assertNotNull(budget.tryAdmitRender("b", VIEW));
+    }
+
+    @Test
+    public void largeAnswerIsRefusedWhenItsPredictedSizeWouldNotFitTheBytes()
+    {
+        // the rack case: 3 x 20 MB held under 64 MiB; a 4th 20-MB render is refused before it starts
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 64 * MIB, 4, 10);
+        budget.recordAnswerSize("a", VIEW, 20 * MIB);
+        for (int idx = 0; idx < 3; idx++)
+        {
+            assertNotNull(budget.tryAcquire("a", 20 * MIB));
+        }
+        assertNull(budget.tryAdmitRender("a", VIEW));
+    }
+
+    @Test
+    public void largeAnswerIsRefusedWhenItsPredictedSizeWouldNotFitGlobally()
+    {
+        ResponseBudget budget = new ResponseBudget(30 * MIB, 1000 * MIB, 10, 10);
+        budget.recordAnswerSize("a", VIEW, 20 * MIB);
+        assertNotNull(budget.tryAcquire("b", 20 * MIB));
+        assertNull(budget.tryAdmitRender("a", VIEW));
+    }
+
+    @Test
+    public void predictedSmallAnswersAreOnlyLimitedByTheRendersCap()
+    {
+        // a client holding its full share of large answers can still render its small ones (e.g. a filtered list)
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 64 * MIB, 1, 2);
+        assertNotNull(budget.tryAcquire("a", 60 * MIB));
+        budget.recordAnswerSize("a", "/v1/view/resources?resources=rd1", 30_000);
+        ResponseBudget.RenderTicket first = budget.tryAdmitRender("a", "/v1/view/resources?resources=rd1");
+        ResponseBudget.RenderTicket unknown = budget.tryAdmitRender("a", "/v1/never-seen");
+        assertNotNull(first);
+        assertNotNull(unknown);
+        assertNull(budget.tryAdmitRender("a", "/v1/never-seen")); // renders cap 2
+        first.close();
+        first.close(); // idempotent
+        assertEquals(1, budget.getRendersInFlight("a"));
+        unknown.close();
+        assertEquals(0, budget.getRendersInFlight("a"));
+    }
+
+    @Test
+    public void rememberedAnswerSizesAreBounded()
+    {
+        ResponseBudget budget = new ResponseBudget(1000 * MIB, 64 * MIB, 1, 100);
+        assertNotNull(budget.tryAcquire("a", 60 * MIB));
+        budget.recordAnswerSize("a", VIEW, 20 * MIB);
+        for (int idx = 0; idx < ResponseBudget.MAX_REMEMBERED_ANSWERS; idx++)
+        {
+            budget.recordAnswerSize("c", "/x" + idx, 1);
+        }
+        // the old entry was evicted: no prediction, so admitted (the filter's lease still applies after the render)
+        ResponseBudget.RenderTicket ticket = budget.tryAdmitRender("a", VIEW);
+        assertNotNull(ticket);
+        ticket.close();
+    }
 }

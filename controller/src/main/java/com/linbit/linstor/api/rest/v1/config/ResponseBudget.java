@@ -24,10 +24,13 @@ public final class ResponseBudget
     public static final String ENV_GLOBAL_MIB = "LINSTOR_CONTROLLER_REST_RESPONSE_BUDGET_MIB";
     public static final String ENV_PER_CLIENT_MIB = "LINSTOR_CONTROLLER_REST_RESPONSE_BUDGET_PER_CLIENT_MIB";
     public static final String ENV_PER_CLIENT_COUNT = "LINSTOR_CONTROLLER_REST_RESPONSE_BUDGET_PER_CLIENT_COUNT";
+    public static final String ENV_PER_CLIENT_RENDERS = "LINSTOR_CONTROLLER_REST_RESPONSE_BUDGET_PER_CLIENT_RENDERS";
 
     static final long MIB = 1024L * 1024L;
     static final long DFLT_PER_CLIENT_BYTES = 64 * MIB;
     static final int DFLT_PER_CLIENT_COUNT = 4;
+    /** Default renders in flight per client (fix-24b E3): this multiple of the per-client count. */
+    static final int DFLT_RENDERS_PER_COUNT = 2;
     /** Default global budget: this fraction (1/n) of the JVM's max heap. */
     static final int DFLT_GLOBAL_HEAP_DIVISOR = 4;
     static final long MAX_MIB = 1024L * 1024L;
@@ -37,13 +40,29 @@ public final class ResponseBudget
      * time. A normal write ends well before: success, IOException or the transport write timeout.
      */
     static final long LEASE_MAX_AGE_NANOS = TimeUnit.MINUTES.toNanos(10);
+    static final int MAX_REMEMBERED_ANSWERS = 4096;
+    /** Answers above this size count as large (the same threshold as ResponseBudgetFilter). */
+    static final long LARGE_ANSWER_BYTES = 1024L * 1024L;
 
     private final long globalCapBytes;
     private final long perClientCapBytes;
     private final int perClientCapCount;
+    private final int perClientCapRenders;
 
     private long globalUsedBytes;
     private final Map<String, long[]> perClient = new HashMap<>(); // client -> {bytes, count}
+    private final Map<String, int[]> perClientRenders = new HashMap<>(); // client -> {renders in flight}
+    /** fix-24b (E3): size of the last answer per "client request-target", to predict the next one. Bounded LRU. */
+    private final Map<String, Long> lastAnswerBytes = new java.util.LinkedHashMap<>(16, 0.75f, true)
+    {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Long> eldest)
+        {
+            return size() > MAX_REMEMBERED_ANSWERS;
+        }
+    };
     private final LinkedHashSet<Lease> active = new LinkedHashSet<>(); // oldest first
     private final NanoClock clock;
     private long expiredCount;
@@ -56,11 +75,49 @@ public final class ResponseBudget
 
     public ResponseBudget(long globalCapBytesRef, long perClientCapBytesRef, int perClientCapCountRef)
     {
-        this(globalCapBytesRef, perClientCapBytesRef, perClientCapCountRef, System::nanoTime);
+        this(
+            globalCapBytesRef,
+            perClientCapBytesRef,
+            perClientCapCountRef,
+            perClientCapCountRef * DFLT_RENDERS_PER_COUNT,
+            System::nanoTime
+        );
+    }
+
+    public ResponseBudget(
+        long globalCapBytesRef,
+        long perClientCapBytesRef,
+        int perClientCapCountRef,
+        int perClientCapRendersRef
+    )
+    {
+        this(globalCapBytesRef, perClientCapBytesRef, perClientCapCountRef, perClientCapRendersRef, System::nanoTime);
     }
 
     ResponseBudget(long globalCapBytesRef, long perClientCapBytesRef, int perClientCapCountRef, NanoClock clockRef)
     {
+        this(
+            globalCapBytesRef,
+            perClientCapBytesRef,
+            perClientCapCountRef,
+            perClientCapCountRef * DFLT_RENDERS_PER_COUNT,
+            clockRef
+        );
+    }
+
+    ResponseBudget(
+        long globalCapBytesRef,
+        long perClientCapBytesRef,
+        int perClientCapCountRef,
+        int perClientCapRendersRef,
+        NanoClock clockRef
+    )
+    {
+        if (perClientCapRendersRef <= 0)
+        {
+            throw new IllegalArgumentException("response budget caps must be positive");
+        }
+        perClientCapRenders = perClientCapRendersRef;
         clock = clockRef;
         if (globalCapBytesRef <= 0 || perClientCapBytesRef <= 0 || perClientCapCountRef <= 0)
         {
@@ -69,6 +126,20 @@ public final class ResponseBudget
         globalCapBytes = globalCapBytesRef;
         perClientCapBytes = perClientCapBytesRef;
         perClientCapCount = perClientCapCountRef;
+    }
+
+    private static @Nullable ResponseBudget shared;
+
+    /** The controller's one budget, shared by ResponseBudgetFilter and RequestHelper (created from the environment). */
+    public static synchronized ResponseBudget shared()
+    {
+        ResponseBudget ret = shared;
+        if (ret == null)
+        {
+            ret = fromEnvironment();
+            shared = ret;
+        }
+        return ret;
     }
 
     /** Caps from the environment; unset, unparsable or out-of-range values use the defaults. */
@@ -81,7 +152,13 @@ public final class ResponseBudget
         }
         long perClientBytes = mibOrDefault(System.getenv(ENV_PER_CLIENT_MIB), DFLT_PER_CLIENT_BYTES);
         int perClientCount = (int) longOrDefault(System.getenv(ENV_PER_CLIENT_COUNT), 1, MAX_COUNT, DFLT_PER_CLIENT_COUNT);
-        return new ResponseBudget(globalBytes, perClientBytes, perClientCount);
+        int perClientRenders = (int) longOrDefault(
+            System.getenv(ENV_PER_CLIENT_RENDERS),
+            1,
+            MAX_COUNT,
+            (long) perClientCount * DFLT_RENDERS_PER_COUNT
+        );
+        return new ResponseBudget(globalBytes, perClientBytes, perClientCount, perClientRenders);
     }
 
     static long mibOrDefault(@Nullable String value, long dfltBytes)
@@ -138,6 +215,100 @@ public final class ResponseBudget
             active.add(lease);
         }
         return lease;
+    }
+
+    /** fix-24b (E3): remember the encoded size of an answer, to predict the next one for the same request-target. */
+    public synchronized void recordAnswerSize(String client, String target, long bytes)
+    {
+        lastAnswerBytes.put(client + " " + target, bytes);
+    }
+
+    /**
+     * fix-24b (E3): admission before a render. Returns null (refuse at once, no render) if the client has its maximum of
+     * renders in flight, or if the last answer for the same request-target was large and another one of that size would
+     * not fit the client's count or byte budget, or the global budget. Answers predicted small are only limited by the
+     * renders cap. Close the ticket when the render is done; the byte lease is still taken by ResponseBudgetFilter.
+     */
+    public synchronized @Nullable RenderTicket tryAdmitRender(String client, String target)
+    {
+        expireOldLeases();
+        @Nullable RenderTicket ticket = null;
+        int[] renders = perClientRenders.get(client);
+        int clientRenders = renders == null ? 0 : renders[0];
+        boolean fits = clientRenders < perClientCapRenders;
+        @Nullable Long predicted = lastAnswerBytes.get(client + " " + target);
+        if (fits && predicted != null && predicted > LARGE_ANSWER_BYTES)
+        {
+            long[] used = perClient.get(client);
+            long clientBytes = used == null ? 0 : used[0];
+            long clientCount = used == null ? 0 : used[1];
+            fits = clientCount + 1 <= perClientCapCount &&
+                clientBytes + predicted <= perClientCapBytes &&
+                globalUsedBytes + predicted <= globalCapBytes;
+        }
+        if (fits)
+        {
+            if (renders == null)
+            {
+                renders = new int[1];
+                perClientRenders.put(client, renders);
+            }
+            renders[0]++;
+            ticket = new RenderTicket(client);
+        }
+        return ticket;
+    }
+
+    private synchronized void releaseRender(String client)
+    {
+        int[] renders = perClientRenders.get(client);
+        if (renders != null)
+        {
+            renders[0]--;
+            if (renders[0] <= 0)
+            {
+                perClientRenders.remove(client);
+            }
+        }
+    }
+
+    // package-private for tests
+    synchronized int getRendersInFlight(String client)
+    {
+        int[] renders = perClientRenders.get(client);
+        return renders == null ? 0 : renders[0];
+    }
+
+    public int getPerClientCapRenders()
+    {
+        return perClientCapRenders;
+    }
+
+    /** One render in flight for a client (fix-24b E3). Idempotent close. */
+    public final class RenderTicket implements AutoCloseable
+    {
+        private final String client;
+        private boolean closed;
+
+        private RenderTicket(String clientRef)
+        {
+            client = clientRef;
+        }
+
+        @Override
+        public void close()
+        {
+            boolean doRelease;
+            synchronized (this)
+            {
+                doRelease = !closed;
+                closed = true;
+            }
+            if (doRelease)
+            {
+                releaseRender(client);
+            }
+        }
     }
 
     private void expireOldLeases()

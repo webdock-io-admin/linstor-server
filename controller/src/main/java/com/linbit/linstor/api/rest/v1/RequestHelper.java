@@ -6,6 +6,8 @@ import com.linbit.linstor.api.ApiCallRcImpl;
 import com.linbit.linstor.api.ApiConsts;
 import com.linbit.linstor.api.ApiModule;
 import com.linbit.linstor.api.LinStorScope;
+import com.linbit.linstor.api.rest.v1.config.ResponseBudget;
+import com.linbit.linstor.api.rest.v1.config.ResponseBudgetFilter;
 import com.linbit.linstor.api.rest.v1.utils.ApiCallRcRestUtils;
 import com.linbit.linstor.core.ControllerCoreModule;
 import com.linbit.linstor.core.apicallhandler.response.ApiRcException;
@@ -29,6 +31,7 @@ import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -58,6 +61,8 @@ public class RequestHelper
     private final LdapAuthentication ldapAuthentication;
     private final CtrlConfig linstorConfig;
     private final Scheduler restResponseScheduler;
+
+    private final ResponseBudget responseBudget = ResponseBudget.shared();
 
     /** fix-24 (D): seconds a client is asked to wait when the RestResponse queue is full (503). */
     static final String RETRY_AFTER_SEC = "5";
@@ -347,19 +352,61 @@ public class RequestHelper
      */
     <T> Flux<T> offWorker(Flux<T> flux, Request request)
     {
-        return offWorker(flux).handle(
-            (item, sink) ->
-            {
-                if (isClientConnected(request))
-                {
-                    sink.next(item);
-                }
-                else
-                {
-                    sink.error(new ClientGoneException());
-                }
-            }
+        return Flux.defer(() ->
+        {
+            // fix-24b (E3): the render ticket lives in this closure; doFinally returns it once the render downstream
+            // is done (the render runs synchronously in onNext), on error and on cancel
+            AtomicReference<ResponseBudget.@Nullable RenderTicket> ticketRef = new AtomicReference<>();
+            return offWorker(flux)
+                .<T>handle(
+                    (item, sink) ->
+                    {
+                        if (!isClientConnected(request))
+                        {
+                            sink.error(new ClientGoneException());
+                        }
+                        else if (ticketRef.get() == null && !admitRender(request, ticketRef))
+                        {
+                            sink.error(new RenderRefusedException());
+                        }
+                        else
+                        {
+                            sink.next(item);
+                        }
+                    }
+                )
+                .doFinally(
+                    ignored ->
+                    {
+                        ResponseBudget.@Nullable RenderTicket ticket = ticketRef.getAndSet(null);
+                        if (ticket != null)
+                        {
+                            ticket.close();
+                        }
+                    }
+                );
+        });
+    }
+
+    private boolean admitRender(Request request, AtomicReference<ResponseBudget.@Nullable RenderTicket> ticketRef)
+    {
+        ResponseBudget.@Nullable RenderTicket ticket = responseBudget.tryAdmitRender(
+            ResponseBudgetFilter.clientKeyOf(request),
+            ResponseBudgetFilter.requestTarget(request)
         );
+        ticketRef.set(ticket);
+        return ticket != null;
+    }
+
+    /** fix-24b (E3): the client already has its share of large answers or renders in flight. */
+    static final class RenderRefusedException extends RuntimeException
+    {
+        private static final long serialVersionUID = 1L;
+
+        RenderRefusedException()
+        {
+            super("REST response budget: client has its share of large answers or renders in flight", null, false, false);
+        }
     }
 
     static boolean isClientConnected(@Nullable Request request)
@@ -403,6 +450,23 @@ public class RequestHelper
             // fix-24b (E1): nobody is left to read an answer; end the request without a body
             errorReporter.logDebug("REST answer dropped: %s", exc.getMessage());
             asyncResponse.cancel();
+        }
+        else if (exc instanceof RenderRefusedException)
+        {
+            errorReporter.logWarning("REST answer refused before render: %s", exc.getMessage());
+            apiCallRc.addEntry(
+                ApiCallRcImpl.simpleEntry(
+                    ApiConsts.FAIL_UNKNOWN_ERROR,
+                    "Controller REST response budget exhausted, retry in " + RETRY_AFTER_SEC + " s"
+                )
+            );
+            asyncResponse.resume(
+                Response.fromResponse(
+                    ApiCallRcRestUtils.toResponse(apiCallRc, Response.Status.SERVICE_UNAVAILABLE)
+                )
+                    .header("Retry-After", RETRY_AFTER_SEC)
+                    .build()
+            );
         }
         else if (isRejected(exc))
         {
