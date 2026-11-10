@@ -504,13 +504,7 @@ public class RequestHelper
                     "Controller REST response budget exhausted, retry in " + RETRY_AFTER_SEC + " s"
                 )
             );
-            asyncResponse.resume(
-                Response.fromResponse(
-                    ApiCallRcRestUtils.toResponse(apiCallRc, Response.Status.SERVICE_UNAVAILABLE)
-                )
-                    .header("Retry-After", RETRY_AFTER_SEC)
-                    .build()
-            );
+            asyncResponse.resume(serviceUnavailable(apiCallRc));
         }
         else if (isRejected(exc))
         {
@@ -521,13 +515,7 @@ public class RequestHelper
                     "Controller busy writing REST responses, retry in " + RETRY_AFTER_SEC + " s"
                 )
             );
-            asyncResponse.resume(
-                Response.fromResponse(
-                    ApiCallRcRestUtils.toResponse(apiCallRc, Response.Status.SERVICE_UNAVAILABLE)
-                )
-                    .header("Retry-After", RETRY_AFTER_SEC)
-                    .build()
-            );
+            asyncResponse.resume(serviceUnavailable(apiCallRc));
         }
         else
         {
@@ -539,6 +527,20 @@ public class RequestHelper
                 ApiCallRcRestUtils.toResponse(apiCallRc, Response.Status.INTERNAL_SERVER_ERROR)
             );
         }
+    }
+
+    /**
+     * fix-24b (E3e): 503 + Retry-After with the usual ApiCallRc body. ApiCallRcRestUtils.toResponse(rc, status) uses the
+     * given status only for a success; with an error entry (FAIL_UNKNOWN_ERROR) it answers 500. So the status is set
+     * here explicitly. That made the before-render refusal (E3/E3b) and fix 24's "response queue full" answer 500.
+     */
+    static Response serviceUnavailable(ApiCallRcImpl apiCallRc)
+    {
+        Response errorBody = ApiCallRcRestUtils.toResponse(apiCallRc, Response.Status.SERVICE_UNAVAILABLE);
+        return Response.fromResponse(errorBody)
+            .status(Response.Status.SERVICE_UNAVAILABLE)
+            .header("Retry-After", RETRY_AFTER_SEC)
+            .build();
     }
 
     static boolean isRejected(@Nullable Throwable exc)

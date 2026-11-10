@@ -165,4 +165,53 @@ public class RequestHelperAdmitRenderTest
             inFlight.forEach(Disposable::dispose);
         }
     }
+
+    @Test
+    public void earlyRefusalThroughDoFluxIs503WithRetryAfter()
+    {
+        // E3e: the refusal before the fan-out must reach the client as 503 + Retry-After, not as 500
+        budget.recordAnswerSize(client, "/v1/view/resources", 14 * MIB);
+        List<Disposable> inFlight = new ArrayList<>();
+        try
+        {
+            for (int idx = 0; idx < 4; idx++)
+            {
+                inFlight.add(helper.offWorker(walk(new java.util.concurrent.atomic.AtomicInteger()), request()).subscribe());
+            }
+            javax.ws.rs.container.AsyncResponse asyncResponse = mock(javax.ws.rs.container.AsyncResponse.class);
+            Request req = request();
+            helper.doFlux(
+                "LstVlm",
+                req,
+                asyncResponse,
+                helper.offWorker(Flux.just("data"), req)
+                    .map(ignored -> javax.ws.rs.core.Response.ok().build())
+                    .next()
+            );
+            org.mockito.ArgumentCaptor<Object> resumed = org.mockito.ArgumentCaptor.forClass(Object.class);
+            org.mockito.Mockito.verify(asyncResponse, org.mockito.Mockito.timeout(5_000)).resume(resumed.capture());
+            Object value = resumed.getValue();
+            assertTrue("expected a Response, got " + value, value instanceof javax.ws.rs.core.Response);
+            javax.ws.rs.core.Response response = (javax.ws.rs.core.Response) value;
+            assertEquals(503, response.getStatus());
+            assertEquals("5", response.getHeaderString("Retry-After"));
+        }
+        finally
+        {
+            inFlight.forEach(Disposable::dispose);
+        }
+    }
+
+    @Test
+    public void fullResponseQueueIs503WithRetryAfter()
+    {
+        // fix 24 (D) path, same toResponse problem: a rejected publishOn must answer 503, not 500
+        javax.ws.rs.container.AsyncResponse asyncResponse = mock(javax.ws.rs.container.AsyncResponse.class);
+        helper.resumeWithError(asyncResponse, new java.util.concurrent.RejectedExecutionException("queue full"));
+        org.mockito.ArgumentCaptor<Object> resumed = org.mockito.ArgumentCaptor.forClass(Object.class);
+        org.mockito.Mockito.verify(asyncResponse).resume(resumed.capture());
+        javax.ws.rs.core.Response response = (javax.ws.rs.core.Response) resumed.getValue();
+        assertEquals(503, response.getStatus());
+        assertEquals("5", response.getHeaderString("Retry-After"));
+    }
 }
