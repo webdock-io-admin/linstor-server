@@ -4,7 +4,6 @@ import com.linbit.linstor.api.ApiCallRc;
 import com.linbit.linstor.api.ApiCallRcImpl;
 import com.linbit.linstor.api.ApiConsts;
 import com.linbit.linstor.api.interfaces.serializer.CtrlStltSerializer;
-import com.linbit.linstor.core.apicallhandler.controller.CtrlRscDfnDeleteApiCallHandler;
 import com.linbit.linstor.core.identifier.NodeName;
 import com.linbit.linstor.core.identifier.ResourceName;
 import com.linbit.linstor.core.objects.Resource;
@@ -16,9 +15,11 @@ import com.linbit.linstor.testutils.EmptyErrorReporter;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -31,8 +32,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -41,7 +40,8 @@ import static org.mockito.Mockito.when;
  */
 public class RetryResourcesTaskFinishDeleteTest
 {
-    private CtrlRscDfnDeleteApiCallHandler rscDfnDeleteHandler;
+    private final List<ResourceName> finishCalls = new ArrayList<>();
+    private final AtomicReference<Flux<ApiCallRc>> finishResult = new AtomicReference<>();
     private RetryResourcesTask task;
     private Resource rsc;
     private Peer peer;
@@ -51,11 +51,14 @@ public class RetryResourcesTaskFinishDeleteTest
     @Before
     public void setUp() throws Exception
     {
-        rscDfnDeleteHandler = mock(CtrlRscDfnDeleteApiCallHandler.class);
         task = new RetryResourcesTask(
             mock(CtrlStltSerializer.class, RETURNS_DEEP_STUBS),
             new EmptyErrorReporter(),
-            () -> rscDfnDeleteHandler
+            name ->
+            {
+                finishCalls.add(name);
+                return finishResult.get();
+            }
         );
         rscName = new ResourceName("rd1");
         nodeName = new NodeName("node-a");
@@ -65,9 +68,7 @@ public class RetryResourcesTaskFinishDeleteTest
         when(rsc.getResourceDefinition()).thenReturn(rscDfn);
         when(rsc.getUuid()).thenReturn(UUID.randomUUID());
         peer = mock(Peer.class);
-        when(rscDfnDeleteHandler.finishDeleteIfFlagged(rscName)).thenReturn(
-            Flux.just(ApiCallRcImpl.singleApiCallRc(ApiConsts.DELETED, "rd1 deleted"))
-        );
+        finishResult.set(Flux.just(ApiCallRcImpl.singleApiCallRc(ApiConsts.DELETED, "rd1 deleted")));
     }
 
     private static ByteArrayInputStream answer(long retCode, String msg) throws IOException
@@ -83,7 +84,7 @@ public class RetryResourcesTaskFinishDeleteTest
         when(peer.apiCall(anyString(), any())).thenReturn(Flux.just(answer(ApiConsts.MODIFIED, "deleted")));
         AtomicBoolean nextStepRan = new AtomicBoolean(false);
         AtomicBoolean nextStepRanFirst = new AtomicBoolean(false);
-        when(rscDfnDeleteHandler.finishDeleteIfFlagged(rscName)).thenReturn(
+        finishResult.set(
             Flux.defer(() ->
             {
                 nextStepRanFirst.set(nextStepRan.get());
@@ -99,7 +100,7 @@ public class RetryResourcesTaskFinishDeleteTest
             })
         ).collectList().block();
 
-        verify(rscDfnDeleteHandler).finishDeleteIfFlagged(rscName);
+        assertEquals(List.of(rscName), finishCalls);
         assertTrue("next step must run before the rd delete is finished", nextStepRanFirst.get());
         assertEquals(2, out.size());
         assertTrue(out.get(1).stream().anyMatch(entry -> (entry.getReturnCode() & ApiConsts.DELETED) == ApiConsts.DELETED));
@@ -114,7 +115,7 @@ public class RetryResourcesTaskFinishDeleteTest
 
         task.retryFlux(rsc, peer, nodeName, null).collectList().block();
 
-        verify(rscDfnDeleteHandler, never()).finishDeleteIfFlagged(any());
+        assertTrue(finishCalls.isEmpty());
     }
 
     @Test
@@ -126,7 +127,7 @@ public class RetryResourcesTaskFinishDeleteTest
 
         List<ApiCallRc> out = task.retryFlux(rsc, peer, nodeName, null).collectList().block();
 
-        verify(rscDfnDeleteHandler, never()).finishDeleteIfFlagged(any());
+        assertTrue(finishCalls.isEmpty());
         assertFalse(out == null);
         assertTrue(out.isEmpty());
     }

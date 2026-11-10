@@ -18,14 +18,15 @@ import com.linbit.linstor.netcom.PeerNotConnectedException;
 import com.linbit.linstor.tasks.TaskScheduleService.Task;
 
 import javax.inject.Inject;
-import javax.inject.Provider;
 import javax.inject.Singleton;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 
+import com.google.inject.Injector;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.util.context.Context;
@@ -54,19 +55,38 @@ public class RetryResourcesTask implements Task
 
     private final CtrlStltSerializer serializer;
     private final ErrorReporter errorReporter;
-    // Provider: CtrlRscDfnDeleteApiCallHandler depends (via truncate and the satellite update caller) on this task
-    private final Provider<CtrlRscDfnDeleteApiCallHandler> rscDfnDeleteHandlerProvider;
+    /**
+     * fix-26: finishes the delete of a resource definition flagged DELETE. Resolved lazily through the injector, not as
+     * a constructor dependency: CtrlRscDfnDeleteApiCallHandler depends on this task (via truncate and the satellite
+     * update caller), and even a Provider would make Guice require that handler's whole graph wherever this task is
+     * bound (e.g. reduced test modules).
+     */
+    private final Function<ResourceName, Flux<ApiCallRc>> rscDfnDeleteFinisher;
 
     @Inject
     public RetryResourcesTask(
         CtrlStltSerializer serializerRef,
         ErrorReporter errorReporterRef,
-        Provider<CtrlRscDfnDeleteApiCallHandler> rscDfnDeleteHandlerProviderRef
+        Injector injectorRef
+    )
+    {
+        this(
+            serializerRef,
+            errorReporterRef,
+            rscName -> injectorRef.getInstance(CtrlRscDfnDeleteApiCallHandler.class).finishDeleteIfFlagged(rscName)
+        );
+    }
+
+    // package-private for tests
+    RetryResourcesTask(
+        CtrlStltSerializer serializerRef,
+        ErrorReporter errorReporterRef,
+        Function<ResourceName, Flux<ApiCallRc>> rscDfnDeleteFinisherRef
     )
     {
         serializer = serializerRef;
         errorReporter = errorReporterRef;
-        rscDfnDeleteHandlerProvider = rscDfnDeleteHandlerProviderRef;
+        rscDfnDeleteFinisher = rscDfnDeleteFinisherRef;
     }
 
     public boolean add(Resource rsc, @Nullable Publisher<ApiCallRc> nextStepRef)
@@ -200,7 +220,7 @@ public class RetryResourcesTask implements Task
 
     private Flux<ApiCallRc> finishRscDfnDelete(ResourceName rscName)
     {
-        return rscDfnDeleteHandlerProvider.get().finishDeleteIfFlagged(rscName);
+        return rscDfnDeleteFinisher.apply(rscName);
     }
 
     private List<RetryConfig> getResourcesToRetry()
